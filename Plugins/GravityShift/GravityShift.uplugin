@@ -1,0 +1,19 @@
+{
+  "FileVersion": 3,
+  "Version": 5,
+  "VersionName": "5.0.0",
+  "FriendlyName": "重力翻转 (GravityShift)",
+  "Description": "Z 轴双向重力滚动球运行时:重力管理器、物理滚动球、重力体、表面/落地修正、可破坏、可重置、方块、交互物、世界状态与框架类。",
+  "Category": "Gameplay",
+  "CreatedBy": "WorkBuddy",
+  "CanContainContent": true,
+  "IsBetaVersion": false,
+  "Installed": false,
+  "Modules": [
+    {
+      "Name": "GravityShift",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ]
+}

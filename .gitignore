@@ -1,0 +1,22 @@
+# UE generated
+Binaries/*
+Plugins/*/Binaries/*
+Build/*
+DerivedDataCache/*
+Intermediate/*
+Plugins/*/Intermediate/*
+Saved/*
+*.VC.db
+*.sln
+*.suo
+*.code-workspace
+
+# IDE / OS
+.vs/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# Python
+__pycache__/
+*.pyc
