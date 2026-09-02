@@ -169,7 +169,7 @@ v5 双向 Z 重力滚球系统**已在 z-flip 编译、安装、搭建并 PIE �
 
 **验收留待用户**:PIE 里实际按 **WASD 滚球( torque 路径)、G 翻转、E 开关、R 重置**——OS 级按键注入会干扰真人操作,未代测。编辑器窗口在后台时 UE 会深度节流,游玩时把编辑器切到前台。
 
-**git**:z-flip 尚未建仓;如需同步 GitHub,MyProject2 的 REST 直传脚本可直接改 REPO/WORKDIR 复用。
+**git**:仓库已建 **https://github.com/madtwo/z-flip**(私有,2026-09-02 晚 REST 直推 122 文件,commit cdd172c)。仓库内含:`README.md`(使用+测试状态)/`USAGE_WHITEBOX.md`(白盒装配)/`AGENT_GUIDE.md`(AI 接手)/`AgentSkill/`(ue-nocode + ue-cpp-build-cnpath 两套 skill 随仓带走)。克隆后右键 uproject 重编译即可玩;推送用 `AgentSkill/ue-nocode/reference/push_via_api.py "madtwo/z-flip" "D:/UE/z-flip"`。开代理后一次 `git fetch origin && git reset --hard origin/main` 对齐历史(REST 引导提交导致 sha 与本地不同,内容一致)。
 
 ---
 
