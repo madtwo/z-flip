@@ -16,6 +16,8 @@ Saved/*
 .idea/
 Thumbs.db
 Desktop.ini
+*.slnx
+*.vsconfig
 
 # Python
 __pycache__/
