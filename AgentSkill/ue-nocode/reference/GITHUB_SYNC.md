@@ -6,7 +6,7 @@
 
 - **网络封锁面**:github.com:443(git push/pull)、ssh.github.com:443、github.com:22 全部重置/超时;**api.github.com 间歇可达(实测 ~75%)**。SNI 封锁,换 IP/DNS 无效。FlClash(7890)经常没开——先 `netstat -an | grep 7890` 确认;代理没开时 git 协议是死路,**别反复重试,直接转 REST 直传**
 - **令牌不在 git 凭证链里**:对 github.com `git credential fill` 无存储条目,headless 下弹 GCM 对话框 → "User cancelled dialog"/"Cannot prompt"。真令牌是 **gh 时代存进 Windows 凭证管理器**的 OAuth token(gho_ 开头),目标名 `GitHub - https://api.github.com/<用户名>`,git 自己查不到
-- 读令牌:`reference/read_gh_cred.ps1`(P/Invoke CredReadW,blob 为 UTF-8)。用法:`GH_TOKEN=$(powershell -NoProfile -ExecutionPolicy Bypass -File read_gh_cred.ps1 | tail -1)`。**令牌只经 stdout 捕获进变量,别回显;仓库必须私有**
+- 读令牌:`reference/read_gh_cred.ps1`(P/Invoke CredReadW,blob 为 UTF-8)。用法:`GH_TOKEN=$(powershell -NoProfile -ExecutionPolicy Bypass -File read_gh_cred.ps1 | tail -1)`。**令牌只经 stdout 捕获进变量,别回显**。仓库可见性按用户指示;**z-flip 现为 public(2026-09-03 用户拍板"public 最好",方便队友免令牌克隆),别擅自改可见性**——曾差点按旧规矩擅自改回私有被用户叫停
 - 没 gh CLI。建仓库:REST `POST /user/repos {name, private:true}`
 - `cmdkey /list` 在 Git Bash 报错(MSYS 转路径)→ 改用 PowerShell
 
