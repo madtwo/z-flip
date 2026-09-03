@@ -6,8 +6,10 @@
 #include "GameFramework/Pawn.h"
 #include "UObject/ConstructorHelpers.h"
 
+#include "GSBlockBase.h"
 #include "GSBreakableComponent.h"
 #include "GSGravityManager.h"
+#include "GSGridSnapComponent.h"
 #include "GSProfiles.h"
 #include "GSResettableComponent.h"
 
@@ -18,6 +20,103 @@
 AGSWorldStateManager::AGSWorldStateManager()
 {
 	PrimaryActorTick.bCanEverTick = false;
+}
+
+void AGSWorldStateManager::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// Config is applied here; if the manager has not been spawned yet (level-placed
+	// world state + game-mode-spawned manager) RetryApplyLevelGravityConfig covers it.
+	ApplyLevelGravityConfig();
+}
+
+TArray<EGSGravityAxis> AGSWorldStateManager::GetAllowedAxes() const
+{
+	if (AllowedGravityAxes.Num() == 0)
+	{
+		TArray<EGSGravityAxis> All;
+		All.Add(EGSGravityAxis::X);
+		All.Add(EGSGravityAxis::Y);
+		All.Add(EGSGravityAxis::Z);
+		return All;
+	}
+	return AllowedGravityAxes;
+}
+
+bool AGSWorldStateManager::IsDirectionAllowed(EGSGravityDirection Dir) const
+{
+	return GetAllowedAxes().Contains(GSGravity::GetAxisFromDirection(Dir));
+}
+
+void AGSWorldStateManager::ApplyLevelGravityConfig()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	AGSGravityManager* Manager = AGSGravityManager::FindGravityManager(this);
+	if (!Manager)
+	{
+		// Manager (game-mode-spawned) may not exist yet when a level-placed world
+		// state runs BeginPlay. Retry a bounded number of times.
+		if (LevelGravityConfigRetryCount < 20 && !LevelGravityConfigRetryHandle.IsValid())
+		{
+			++LevelGravityConfigRetryCount;
+			World->GetTimerManager().SetTimer(LevelGravityConfigRetryHandle, this,
+				&AGSWorldStateManager::RetryApplyLevelGravityConfig, 0.05f, false);
+		}
+		return;
+	}
+
+	// Intentionally NOT a once-only guard: this is called from boot paths of
+	// differing order (WSM BeginPlay, GameMode EnsureCoreManagers, pawn start),
+	// so re-pushing is the mechanism that lets the level default win no matter
+	// when the manager's BeginPlay/profile runs. Re-pushing the same values is a
+	// cheap no-op (RequestGravityDirection returns NO_CHANGE).
+
+	const TArray<EGSGravityAxis> Allowed = GetAllowedAxes();
+
+	EGSGravityDirection EffectiveDefault = DefaultGravityDirection;
+	if (!Allowed.Contains(GSGravity::GetAxisFromDirection(EffectiveDefault)))
+	{
+		EffectiveDefault = GSGravity::GetPositiveDirection(Allowed[0]);
+		UE_LOG(LogTemp, Warning,
+			TEXT("[GravityShift] level DefaultGravityDirection %s not in allowed axes; falling back to %s"),
+			*GSGravity::GetDirectionDisplayName(DefaultGravityDirection),
+			*GSGravity::GetDirectionDisplayName(EffectiveDefault));
+	}
+
+	Manager->SetAllowedAxes(Allowed);
+	// The manager resets to DefaultDirection on ResetGravity, so push the level
+	// default there too.
+	Manager->DefaultDirection = EffectiveDefault;
+	Manager->RequestGravityDirection(EffectiveDefault, this, EGSGravityChangeReason::SCRIPTED, /*bForce=*/true);
+
+	// The manager may be game-mode-spawned with its BeginPlay deferred (which
+	// re-applies the profile default). Schedule one final settle pass so the level
+	// default wins no matter the BeginPlay order.
+	if (!bLevelGravityConfigSettled)
+	{
+		bLevelGravityConfigSettled = true;
+		if (!LevelGravityConfigSettleHandle.IsValid())
+		{
+			World->GetTimerManager().SetTimer(LevelGravityConfigSettleHandle, this,
+				&AGSWorldStateManager::RetryApplyLevelGravityConfig, 0.1f, false);
+		}
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[GravityShift] level gravity config applied: default=%s allowedAxes=%d"),
+		*GSGravity::GetDirectionDisplayName(EffectiveDefault), Allowed.Num());
+}
+
+void AGSWorldStateManager::RetryApplyLevelGravityConfig()
+{
+	LevelGravityConfigRetryHandle.Invalidate();
+	LevelGravityConfigSettleHandle.Invalidate();
+	ApplyLevelGravityConfig();
 }
 
 AGSWorldStateManager* AGSWorldStateManager::FindWorldStateManager(UObject* WorldContextObject)
@@ -125,6 +224,17 @@ void AGSWorldStateManager::ResetWorld()
 		if (UGSResettableComponent* Resettable = RegisteredPlayer->FindComponentByClass<UGSResettableComponent>())
 		{
 			Resettable->TeleportAndReset(ActiveCheckpointTransform);
+		}
+	}
+
+	// After everything is restored, re-align grid-snapped blocks so a reset puts
+	// puzzle pieces back exactly on the grid.
+	for (TActorIterator<AGSBlockBase> It(World); It; ++It)
+	{
+		AGSBlockBase* Block = *It;
+		if (Block && Block->GridSnapComponent)
+		{
+			Block->GridSnapComponent->ApplySnap();
 		}
 	}
 

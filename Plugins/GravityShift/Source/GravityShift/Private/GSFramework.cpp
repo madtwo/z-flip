@@ -55,6 +55,14 @@ void AGSGravityGameMode::EnsureCoreManagers()
 		StateManager->SetActorLabel(TEXT("GravityShift_WorldState"));
 		UE_LOG(LogTemp, Log, TEXT("[GravityShift] game mode spawned world state manager"));
 	}
+
+	// Apply the world-state manager's level gravity config as early as possible so
+	// the ball spawns with the level's intended direction (the manager may spawn
+	// after level-placed actors, hence this call in addition to WSM BeginPlay).
+	if (AGSWorldStateManager* StateManager = AGSWorldStateManager::FindWorldStateManager(this))
+	{
+		StateManager->ApplyLevelGravityConfig();
+	}
 }
 
 void AGSGravityGameMode::HandleStartingNewPlayer_Implementation(APlayerController* NewPlayer)
@@ -69,6 +77,15 @@ void AGSGravityGameMode::HandleStartingNewPlayer_Implementation(APlayerControlle
 			Ball->ApplyBallProfile(DefaultBallProfile);
 		}
 		Ball->RefreshSystemReferences();
+
+		// Re-assert the level gravity config once the pawn is up. By now every
+		// actor BeginPlay (including a game-mode-spawned manager) has run, so this
+		// settles the ordering where the manager's profile default would otherwise
+		// clobber the level default.
+		if (AGSWorldStateManager* StateManager = AGSWorldStateManager::FindWorldStateManager(NewPlayer))
+		{
+			StateManager->ApplyLevelGravityConfig();
+		}
 	}
 }
 
@@ -106,12 +123,34 @@ void AGSGravityHUD::DrawHUD()
 	if (bShowGravityStatus)
 	{
 		AGSGravityManager* Manager = Ball->GravityManager;
-		const EGSGravityPolarity Polarity = Ball->GetCurrentGravityPolarity();
+		const EGSGravityDirection Direction = Ball->GetCurrentGravityDirection();
 		Lines.Add(FString::Printf(TEXT("Gravity: %s   (rev %d)"),
-			Polarity == EGSGravityPolarity::POSITIVE_Z ? TEXT("+Z  CEILING") : TEXT("-Z  FLOOR"),
+			*GSGravity::GetDirectionDisplayName(Direction),
 			Manager ? Manager->GravityRevision : 0));
+
+		if (Manager)
+		{
+			const TArray<EGSGravityAxis> Allowed = Manager->GetAllowedAxes();
+			FString AxesText;
+			for (const EGSGravityAxis Axis : Allowed)
+			{
+				if (!AxesText.IsEmpty())
+				{
+					AxesText += TEXT("  ");
+				}
+				AxesText += GSGravity::GetAxisDisplayName(Axis);
+			}
+			Lines.Add(FString::Printf(TEXT("Allowed axes: %s"), *AxesText));
+		}
+
 		Lines.Add(FString::Printf(TEXT("Camera up: (%.2f, %.2f, %.2f)"),
 			Ball->GetCameraUpVector().X, Ball->GetCameraUpVector().Y, Ball->GetCameraUpVector().Z));
+
+		// Transient "X轴不可用" hint shown after a disallowed 1/2/3 press.
+		if (Ball->IsAxisHintActive())
+		{
+			Lines.Add(Ball->GetAxisHintText());
+		}
 	}
 
 	if (bShowFallStatus && Ball->LandingResponse)
@@ -142,7 +181,7 @@ void AGSGravityHUD::DrawHUD()
 
 	if (bShowControls)
 	{
-		Lines.Add(TEXT("WASD roll  |  mouse look  |  G flip gravity  |  E interact  |  R reset"));
+		Lines.Add(TEXT("WASD roll  |  mouse look  |  G flip  |  1/2/3 set X/Y/Z  |  E interact  |  R reset"));
 	}
 
 	float Y = StartPosition.Y;

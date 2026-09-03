@@ -5,6 +5,7 @@
 
 #include "GSBreakableComponent.h"
 #include "GSGravityBodyComponent.h"
+#include "GSGridSnapComponent.h"
 #include "GSProfiles.h"
 #include "GSResettableComponent.h"
 #include "GSSurfaceReceiverComponent.h"
@@ -28,6 +29,11 @@ AGSBlockBase::AGSBlockBase()
 	SurfaceReceiver = CreateDefaultSubobject<UGSSurfaceReceiverComponent>(TEXT("SurfaceReceiver"));
 	BreakableComponent = CreateDefaultSubobject<UGSBreakableComponent>(TEXT("Breakable"));
 	Resettable = CreateDefaultSubobject<UGSResettableComponent>(TEXT("Resettable"));
+	GridSnapComponent = CreateDefaultSubobject<UGSGridSnapComponent>(TEXT("GridSnap"));
+
+	// Snap is opt-in per block profile. Off by default so existing (non-grid-aligned)
+	// levels are unaffected; grid levels enable it on the BlockProfile.
+	GridSnapComponent->SetSnapEnabled(false);
 }
 
 void AGSBlockBase::BeginPlay()
@@ -67,6 +73,11 @@ void AGSBlockBase::ApplyBlockProfile(UGSBlockProfile* NewProfile)
 	MaximumSpeedCm = NewProfile->MaximumSpeedCm;
 	ImpactEnergyMultiplier = NewProfile->ImpactEnergyMultiplier;
 	ImpactSourceTag = NewProfile->ImpactSourceTag;
+
+	if (GridSnapComponent)
+	{
+		GridSnapComponent->SetSnapEnabled(NewProfile->bSnapToGrid);
+	}
 
 	if (NewProfile->Mesh)
 	{

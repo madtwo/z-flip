@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "TimerManager.h"
+#include "GravityShiftTypes.h"
 #include "GSWorldState.generated.h"
 
 class AGSCollectible;
@@ -21,7 +23,26 @@ class GRAVITYSHIFT_API AGSWorldStateManager : public AActor
 public:
 	AGSWorldStateManager();
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
+	// ---- per-level gravity config (designer sets these in the Details panel) --------
+	// The initial gravity direction for this level. Applied to the manager on BeginPlay.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gravity|LevelConfig")
+	EGSGravityDirection DefaultGravityDirection = EGSGravityDirection::NEGATIVE_Z;
+
+	// Axes the player is allowed to flip to in this level. Empty = all (X/Y/Z).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gravity|LevelConfig")
+	TArray<EGSGravityAxis> AllowedGravityAxes;
+
+	UFUNCTION(BlueprintPure, Category = "Gravity|LevelConfig")
+	TArray<EGSGravityAxis> GetAllowedAxes() const;
+
+	UFUNCTION(BlueprintPure, Category = "Gravity|LevelConfig")
+	bool IsDirectionAllowed(EGSGravityDirection Dir) const;
+
+	// Pushes DefaultGravityDirection / AllowedGravityAxes onto AGSGravityManager.
+	// Idempotent; safe to call more than once. Falls back (with a warning) to the
+	// first allowed positive axis if DefaultGravityDirection is not allowed.
+	UFUNCTION(BlueprintCallable, Category = "Gravity|LevelConfig")
+	void ApplyLevelGravityConfig();	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	FTransform ActiveCheckpointTransform = FTransform::Identity;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "GravityShift")
@@ -75,12 +96,21 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "GravityShift", meta = (WorldContext = "WorldContextObject"))
 	static AGSWorldStateManager* FindWorldStateManager(UObject* WorldContextObject);
 
+	virtual void BeginPlay() override;
+
 protected:
 	UPROPERTY()
 	TObjectPtr<APawn> RegisteredPlayer = nullptr;
 
 	UPROPERTY()
 	TArray<TObjectPtr<AGSCollectible>> RegisteredCollectibles;
+
+	bool bLevelGravityConfigSettled = false;
+	FTimerHandle LevelGravityConfigRetryHandle;
+	FTimerHandle LevelGravityConfigSettleHandle;
+	int32 LevelGravityConfigRetryCount = 0;
+
+	void RetryApplyLevelGravityConfig();
 };
 
 UCLASS(Blueprintable, BlueprintType, meta = (DisplayName = "GS Checkpoint"))

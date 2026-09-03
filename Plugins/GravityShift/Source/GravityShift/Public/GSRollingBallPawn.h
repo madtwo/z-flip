@@ -99,6 +99,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
 	FKey ResetKey = EKeys::R;
 
+	// Set-axis keys: snap gravity to the positive direction of the pressed axis.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
+	FKey AxisSetXKey = EKeys::One;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
+	FKey AxisSetYKey = EKeys::Two;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
+	FKey AxisSetZKey = EKeys::Three;
+
+	// How long the "X轴不可用" hint stays on screen after a disallowed 1/2/3 press.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input", meta = (ClampMin = "0.0"))
+	float AxisHintLifetimeSeconds = 1.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement")
 	bool bAllowAirControl = true;
 
@@ -171,6 +185,20 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "GravityShift")
 	EGSGravityRequestResult RequestGravityPolarity(EGSGravityPolarity NewPolarity, bool bForce);
 
+	// Requests an arbitrary gravity direction (script/level use).
+	UFUNCTION(BlueprintCallable, Category = "GravityShift")
+	EGSGravityRequestResult RequestGravityDirection(EGSGravityDirection NewDirection, bool bForce);
+
+	UFUNCTION(BlueprintPure, Category = "GravityShift")
+	EGSGravityDirection GetCurrentGravityDirection() const;
+
+	// Transient "X axis unavailable" feedback (driven by 1/2/3 on disallowed axes).
+	UFUNCTION(BlueprintPure, Category = "GravityShift")
+	bool IsAxisHintActive() const;
+
+	UFUNCTION(BlueprintPure, Category = "GravityShift")
+	FString GetAxisHintText() const;
+
 	UFUNCTION(BlueprintCallable, Category = "GravityShift")
 	bool TryInteract();
 
@@ -217,6 +245,12 @@ protected:
 	bool bFlipKeyWasDown = false;
 	bool bInteractKeyWasDown = false;
 	bool bResetKeyWasDown = false;
+	bool bAxisSetXWasDown = false;
+	bool bAxisSetYWasDown = false;
+	bool bAxisSetZWasDown = false;
+
+	float AxisHintExpireTime = -1.0f;
+	FString AxisHintText;
 
 	FVector GetActiveGravityDirection() const;
 	FQuat BuildCameraRotation(const FVector& UpVector) const;
@@ -224,6 +258,8 @@ protected:
 	void ApplyMovement(float DeltaSeconds);
 	void PollNativeInput();
 	void HandleFlipPressed();
+	void HandleSetGravityAxis(EGSGravityAxis Axis);
+	void ShowAxisDisabledHint(EGSGravityAxis Axis);
 	AActor* FindBestInteractable() const;
 
 	UFUNCTION()

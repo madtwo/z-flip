@@ -9,6 +9,7 @@
 class UGSBlockProfile;
 class UGSBreakableComponent;
 class UGSGravityBodyComponent;
+class UGSGridSnapComponent;
 class UGSResettableComponent;
 class UGSSurfaceReceiverComponent;
 class UStaticMesh;
@@ -36,6 +37,9 @@ public:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "GravityShift|Components")
 	TObjectPtr<UGSResettableComponent> Resettable = nullptr;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "GravityShift|Components")
+	TObjectPtr<UGSGridSnapComponent> GridSnapComponent = nullptr;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	TObjectPtr<UGSBlockProfile> BlockProfile = nullptr;

@@ -378,6 +378,28 @@ void AGSRollingBallPawn::PollNativeInput()
 		ResetToCheckpoint();
 	}
 	bResetKeyWasDown = bResetDown;
+
+	// Set-axis keys 1/2/3 snap gravity to the positive direction of that axis.
+	const bool bAxisSetXDown = PC->IsInputKeyDown(AxisSetXKey);
+	if (bAxisSetXDown && !bAxisSetXWasDown)
+	{
+		HandleSetGravityAxis(EGSGravityAxis::X);
+	}
+	bAxisSetXWasDown = bAxisSetXDown;
+
+	const bool bAxisSetYDown = PC->IsInputKeyDown(AxisSetYKey);
+	if (bAxisSetYDown && !bAxisSetYWasDown)
+	{
+		HandleSetGravityAxis(EGSGravityAxis::Y);
+	}
+	bAxisSetYWasDown = bAxisSetYDown;
+
+	const bool bAxisSetZDown = PC->IsInputKeyDown(AxisSetZKey);
+	if (bAxisSetZDown && !bAxisSetZWasDown)
+	{
+		HandleSetGravityAxis(EGSGravityAxis::Z);
+	}
+	bAxisSetZWasDown = bAxisSetZDown;
 }
 
 void AGSRollingBallPawn::Tick(float DeltaSeconds)
@@ -430,6 +452,54 @@ EGSGravityRequestResult AGSRollingBallPawn::RequestGravityPolarity(EGSGravityPol
 	}
 
 	return GravityManager->RequestGravityPolarity(NewPolarity, this, EGSGravityChangeReason::SCRIPTED, bForce);
+}
+
+EGSGravityRequestResult AGSRollingBallPawn::RequestGravityDirection(EGSGravityDirection NewDirection, bool bForce)
+{
+	if (!GravityManager)
+	{
+		return EGSGravityRequestResult::NO_MANAGER;
+	}
+
+	return GravityManager->RequestGravityDirection(NewDirection, this, EGSGravityChangeReason::SCRIPTED, bForce);
+}
+
+EGSGravityDirection AGSRollingBallPawn::GetCurrentGravityDirection() const
+{
+	return GravityManager ? GravityManager->GetCurrentDirection() : EGSGravityDirection::NEGATIVE_Z;
+}
+
+void AGSRollingBallPawn::HandleSetGravityAxis(EGSGravityAxis Axis)
+{
+	if (!GravityManager)
+	{
+		return;
+	}
+
+	// 1/2/3 snap gravity to the positive direction of the pressed axis. Pressing
+	// the already-active axis yields NO_CHANGE, which is harmless.
+	const EGSGravityRequestResult Result = GravityManager->SetGravityAxis(Axis, this, false);
+	if (Result == EGSGravityRequestResult::REJECTED_DISABLED)
+	{
+		ShowAxisDisabledHint(Axis);
+	}
+}
+
+void AGSRollingBallPawn::ShowAxisDisabledHint(EGSGravityAxis Axis)
+{
+	AxisHintText = FString::Printf(TEXT("%s轴不可用"), *GSGravity::GetAxisDisplayName(Axis));
+	AxisHintExpireTime = GetWorld() ? GetWorld()->GetTimeSeconds() + AxisHintLifetimeSeconds : -1.0f;
+}
+
+bool AGSRollingBallPawn::IsAxisHintActive() const
+{
+	const UWorld* World = GetWorld();
+	return World && AxisHintExpireTime >= 0.0f && World->GetTimeSeconds() < AxisHintExpireTime;
+}
+
+FString AGSRollingBallPawn::GetAxisHintText() const
+{
+	return AxisHintText;
 }
 
 AActor* AGSRollingBallPawn::FindBestInteractable() const

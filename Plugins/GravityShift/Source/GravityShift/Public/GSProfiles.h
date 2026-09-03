@@ -201,6 +201,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	TObjectPtr<UStaticMesh> Mesh = nullptr;
 
+	// Grid-aligned levels: snap this block to the 100cm grid while it settles and
+	// after flips/resets. Off by default so existing non-grid geometry is unaffected.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid Snap")
+	bool bSnapToGrid = false;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	bool bStartSimulatingPhysics = false;
 

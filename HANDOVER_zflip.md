@@ -1,7 +1,7 @@
 # GravityShift v5 — 进度同步 / 交接文档（z-flip 项目）
 
-> 更新时间：2026-09-02 19:2x (GMT+8)
-> 状态：**v5 系统性验收通过（API 级），待用户实机按键游玩验收**
+> 更新时间：2026-09-03 (GMT+8)
+> 状态：v5 已验收（见 §8-§10）；**v6 六方向重力源码已落地并 C++ 编译通过（见 §11），待 PIE 实测验收**
 > 写这份文档的目的：先把做到哪、卡在哪、改了什么、踩了什么雷同步清楚，供人工诊断。
 
 ---
@@ -195,3 +195,87 @@ v5 双向 Z 重力滚球系统**已在 z-flip 编译、安装、搭建并 PIE �
 - **修复(懒绑定)**:注册+订阅从 BeginPlay 挪进 `RefreshReferences`(RegisterGravityBody 自带去重、AddUniqueDynamic 幂等),`TickComponent` 里 manager 为空就重试。修后 REG=3(球+重力块+破坏块)。
 - **实测**:G 翻转 → 重力/破坏方块**纯 z 向直上**(无翻滚)贴住棚顶 850 且速度归零、翻转粘滞(rev 不变);静态方块(sim=False)不动;reset 后回落 47/50/51。配合 V_HIGH 上调 2000(见 §9 速记),球的落地反翻不再打断贴顶状态。
 - 方块**没有**落地速度弹跳/反重力机制(设计如此,仅球有)——用户明确确认。
+
+---
+
+## 11. 2026-09-03 第六轮:六方向重力(双向 Z → ±X/±Y/±Z)+ 关卡重力配置 + 方块网格吸附(源码落地,**C++ 编译通过**)
+
+> 状态:本轮为**规格实现 + 源码落地**,按规格 §1-§8 逐步完成;**已用引擎 UBT 编译通过**(`D:\Epic Games\UE_5.8` 内置 dotnet 直调 UBT,ZFlipEditor Win64 Development -NoUBA,62s 成功,`UnrealEditor-GravityShift.dll` 链接就位)。剩 PIE 实测验收。规格与实现的两处偏差见 §11.6(均经用户确认)。
+
+### 11.1 需求回顾(规格要点)
+
+把"双向 Z 重力"升级为**六方向**(重力"向下"可为 ±X/±Y/±Z 任一方向):1/2/3 键把重力吸到 X/Y/Z 轴正方向,G 在当前轴上 ± 翻转;每关可通过 WorldStateManager 指定默认重力方向 + 允许轴(空=全允许);HUD 显示当前方向/允许轴/不可用提示;块(仅块,不含球)支持网格吸附。
+
+### 11.2 改动文件清单
+
+**改(Public|Private 成对)**
+- `GravityShiftTypes.h`:新增 `EGSGravityDirection`(±X/±Y/±Z)、`EGSGravityAxis`(X/Y/Z);`EGSGravityRequestResult` 增 `REJECTED_DISABLED`;`GSGravity` 命名空间新增 8 个工具(`DirectionToVector/DirectionToUp/VectorToDirection/FlipDirection/GetAxisFromDirection/IsPositive/GetPositiveDirection/GetNegativeDirection` + 显示名 `GetDirectionDisplayName`/`GetAxisDisplayName` + `IsAxisAllowed`)。
+- `GSGravityManager.h/.cpp`:六方向权威(`CurrentDirection/DefaultDirection/AllowedAxes Transient`),新 5 参委托 `OnGravityDirectionChanged`(NewDirection/DirectionVector/Revision/Reason/Requester);请求入口 `RequestGravityDirection/SetGravityAxis/ToggleCurrentAxis/SetAllowedAxes/IsDirectionAllowed`;**保留并继续广播旧 4 参 `OnGravityChanged`**(GravityBody 唤醒、Pawn 摄像机、老 BP 不动);冷却手动 0.25s/自动 0.75s;`ResetGravity` 回 `DefaultDirection`。
+- `GSWorldState.h/.cpp`:关卡配置区 `Gravity|LevelConfig`(`DefaultGravityDirection`=NEGATIVE_Z、`AllowedGravityAxes` 空=全轴、`GetAllowedAxes/IsDirectionAllowed/ApplyLevelGravityConfig`);BeginPlay + GameMode 同步调用;默认方向不在允许轴时 Warning + 回退第一个允许轴正方向;配置带 0.1s settle 重推防 BeginPlay 乱序(见 §11.7)。`ResetWorld` 末尾对所有 `AGSBlockBase` 重新 `ApplySnap`。
+- `GSRollingBallPawn.h/.cpp`:轮询新增 `AxisSetXKey/YKey/ZKey`(默认 1/2/3)边沿检测 → `HandleSetGravityAxis`(走 `Manager->SetGravityAxis`);`RequestGravityDirection/GetCurrentGravityDirection`;不可用键 → `ShowAxisDisabledHint`(HUD 提示 "X轴不可用" ~1s);G 键经旧入口 `RequestToggleGravity` → 新 `ToggleCurrentAxis` 自动在当前轴翻转,无需改。
+- `GSBlockBase.h/.cpp`:ctor 建 `UGSGridSnapComponent`,默认 `SetSnapEnabled(false)`,`ApplyBlockProfile` 按 `UGSBlockProfile.bSnapToGrid` 启停。
+- `GSProfiles.h`:`UGSBlockProfile.bSnapToGrid`(**默认 false**,与规格字面 true 不同,见 §11.6)。
+- `GSFramework.cpp`:GameMode `HandleStartingNewPlayer` 重推关卡配置;HUD `DrawHUD` 显示当前方向/允许轴列表/不可用提示,控件行加 1/2/3。
+
+**新增**
+- `GSGridSnapComponent.h/.cpp`(Task 5):网格吸附组件。`bSnapEnabled/GridSize/SnapToGrid/ApplySnap/SetSnapEnabled`;BeginPlay + Tick(TG_PostPhysics)吸附;订阅新委托,翻转时禁吸附并按 `SnapRestoreDelaySeconds`(默认 0.35)定时恢复;速度闸门 `IsSafeToSnap`(刚体静止或速度 ≤ `SnapMaxMoveSpeedCm`)避免与物理掐架;用 `TeleportPhysics` 遥放置。
+
+### 11.3 行为契约(实现定案)
+
+- **GravityManager 是唯一重力权威**,六方向全走它;所有消费方继续用 `GetGravityDirection()` FVector,方向无关(落地投影早已沿重力轴 DotProduct,见 §11.5),多数物理代码零改动。
+- **每关默认由 WSM 覆盖 Manager**:`ApplyLevelGravityConfig` 把 `AllowedGravityAxes` 推给 `Manager->SetAllowedAxes`,把 `DefaultGravityDirection`(回退后)写进 `Manager->DefaultDirection` 并 `RequestGravityDirection(force=true)`,使 R 重置/WSM ResetWorld 都能回到关卡默认方向。GravityProfile 里旧 `DefaultPolarity` 只表达 ±Z,仅在关卡没配(空 WSM 默认)时生效。
+- **翻转只切方向不动姿态**:球 Actor/碰撞/网格仍不被人为旋转,摄像机四元数 slerp 到 `Up=-gravity`,方块靠重力体纯直线贴面。
+- **旧 API 全兼容**:`RequestGravityPolarity`=请求 ±Z 方向、`RequestToggleGravity`=翻转当前轴,LandingResponse/GravitySwitch/老蓝图不改仍通。
+
+### 11.4 规格逐条核对(§1-§7)
+
+| 规格节 | 交付 |
+|---|---|
+| §1.1 类型+工具 | ✅ 见 §11.2 |
+| §1.2 WSM 关卡配置 | ✅ 默认方向 + 允许轴 + 回退 + Warning + BeginPlay 调用 |
+| §1.3 Manager 六方向 | ✅ 新方向/轴状态 + 新 5 参委托 + 新请求入口 + 双委托广播 + 冷却 |
+| §1.4 Pawn 输入/摄像机 | ✅ 1/2/3 吸轴、G 翻轴、slerp 到新 Up |
+| §1.5 LandingResponse 投影 | ✅ 已方向无关(`DotProduct(Velocity,Dir)`,无需改动,见 §11.5) |
+| §2 块网格吸附 | ✅ 组件 + BlockBase 集成 + Profile 开关 + 翻转后 0.35s 恢复 + ResetWorld 重吸 |
+| §3 HUD | ✅ 当前方向/允许轴/不可用提示 |
+| §4 输入映射 | ⚠ 用项目轮询约定代替 BindAction+DefaultInput.ini(见 §11.6) |
+| §5-§7 设计器流程/开发序/集成矩阵 | ✅ 见 §11.8 |
+
+### 11.5 LandingResponse 免改依据
+
+落地组件早已把"下落速度/距离"沿 `GetGravityDirection()` 投影(速度沿重力轴的 DotProduct 累距、法向冲击 `DotProduct(Normal,-Dir)`、反向保留只取沿 Dir 法向分量),六方向下语义不变;自动反向走 `RequestToggleGravity` → 现在翻转当前轴,方向无关。故 §1.5 无源码改动。
+
+### 11.6 与规格字面的两处偏差(用户已拍板,交接备忘)
+
+1. **`UGSBlockProfile.bSnapToGrid` 默认 false**(规格字面 `=true`):用户选"默认 false(推荐)"。现有 `测试案例.umap` 几何非 100 网格对齐(天花板 850、块静置高度 ~47-51),默认开会把旧关卡块吸偏;网格关卡在各 BlockProfile 上按需勾选。
+2. **输入走项目轮询约定**(规格要求 BindAction + DefaultInput.ini 注册 1/2/3/G):用户选"沿用项目轮询(推荐)"。原因:仓库已记录"关卡摆放实例的 BindAction 会丢 InputComponent"(本插件踩过的雷),轮询 `IsInputKeyDown` 免疫输入栈时序。实现=FKey 属性(默认 One/Two/Three/G)+ `PollNativeInput` 边沿检测,未建 DefaultInput.ini。
+
+### 11.7 时序处理(本规格新增防雷)
+
+Manager 由 GameMode BeginPlay 自动 spawn,BeginPlay **可能延迟到下一 tick**,其 `ApplyGravityProfile` 会把方向重置回 Profile 的 Z 默认,从而盖掉已推的关卡配置。定案三层兜底:WSM BeginPlay 推一次 + GameMode `HandleStartingNewPlayer`(Pawn 就位后,保证晚于一切 BeginPlay)重推 + 推成功后再挂 0.1s settle 单次重推;`ApplyLevelGravityConfig` 去掉一次性闸,天然幂等(同方向 `RequestGravityDirection` 返回 NO_CHANGE 零成本)。已用"块不同步翻转"同款诊断思路:注册数对不上先查 Manager 时序。
+
+### 11.8 设计器工作流(§5)
+
+新关卡/新几何:① 决定关卡默认重力方向(通常为角色初始脚下方向)与允许轴 → ② 找场景里 WSM,Details `Gravity|LevelConfig` 填 `DefaultGravityDirection` + `AllowedGravityAxes`(空=全轴)→ ③ 决定哪些块需网格对齐:勾它们的 `UGSBlockProfile.bSnapToGrid`,并保证摆放/几何本身在 100cm 网格上 → ④ PIE 用 1/2/3/G 验证。
+开发序(规格 §6)已遵守:类型/枚举 → Manager → WSM 配置 → Pawn/摄像机/网格 → HUD。集成矩阵:方向无关核心(GravityBody/LandingResponse/SurfaceReceiver/Breakable/Resettable)零改动;GravitySwitch 的 FORCE ±Z 语义保留,TOGGLE 翻当前轴。
+
+### 11.9 测试用例(待 PIE 实跑;编译已过)
+
+| # | 场景 | 期望 |
+|---|---|---|
+| 1 | Z-only 关卡(Allowed 只留 Z)按 1/2 | `REJECTED_DISABLED`,方向不变,HUD 弹 "X/Y轴不可用" ~1s 后消失;按 3 → +Z |
+| 2 | 关卡默认 +X(WSM `DefaultGravityDirection=POSITIVE_X`) | 出生即 +X(HUD "Gravity: +X"),球自然落向 +X 墙面 |
+| 3 | 翻转后按 R / 踩 KillVolume | `ResetGravity` 回关卡默认方向(如 +X),球回 checkpoint/出生位置(方向+位置都复位) |
+| 4 | 勾了 bSnapToGrid 的块,在网格对齐面上翻转 G | 翻转稳定后(0.35s 恢复+速度闸门)块中心回到整数网格 |
+| 5 | 空 Allowed(全轴)按 1/2/3/G | 六方向自由;G 在 +X↔-X、+Y↔-Y、+Z↔-Z 当前轴上翻 |
+| 6 | 默认方向 = 禁止轴(如 Allowed=Z-only 但默认 +X) | WSM Warning 日志,回退 +Z;球出生 +Z |
+| 7 | 旧行为回归 | 原 Z 双向关卡无 bSnapToGrid 块:几何不漂移;G + 落地反翻 + reset 语义同 v5 |
+| 8 | LandingResponse 自动反向(任意轴) | 六方向下仍沿"当前重力轴"反向(方向无关,改方向后首测) |
+
+### 11.10 已知限制(如实声明)
+
+- **网格吸附只适用于网格对齐几何**:组件把 Actor 位置逐分量 round 到 `GridSize` 网格点;非网格对齐关卡勾了 `bSnapToGrid` 会把块吸偏(故默认关)。块尺寸/半偏移不在网格上时需手动调设计。
+- **吸附是"中心对齐"**,不做体素式重叠修正;速度闸门(`SnapMaxMoveSpeedCm`)下高速落体先不吸,稳定后由 tick 吸上,空中翻转瞬间可能有一两帧不吸(可接受)。
+- **旧 `EGSGravityPolarity` 仅对 Z 轴有意义**:X/Y 方向下镜像的 `CurrentPolarity`/`DefaultPolarity` 只是正负投影,旧 API/BP 若把"极性"当真会误导;新代码一律用方向。
+- **六方向下角色可"站墙/站天花板"**:贴地移动/摇动力矩/摄像机全方向无关,但**尚未实机手感验收**(尤其墙/顶平移与空中转向),与 v5 一样留用户试玩。
+- **编译已过但未 PIE 实测**:`AllowedAxes` 语义/冷却/回退/网格吸附的数值与手感细调,留 PIE 按 §11.9 用例验收。
