@@ -54,7 +54,7 @@
 
 ## 当前项目版图(2026-09-02)
 
-- **主线:`D:\UE\z-flip`**(v5 双向 Z 重力滚球,详见其 `HANDOVER_zflip.md`)
+- **主线:`D:\UE\z-flip`**(v5 双向 Z 已验收;2026-09-03 已同步队友 v6 源码=六方向重力±X/Y/Z+网格吸附+关卡重力配置,HANDOVER §11,**本机 dll 仍是 v5 未重编**,测试前须关编辑器重编;详见其 `HANDOVER_zflip.md`)
 - `D:\UE\MyProject2`:v2 六向已验收基线,已 pivot 停更(工作区有 v5 半成品残留,勿在其上开发)
 - `D:\UE\我的项目2`:原版参考/回退,勿动
 - 参考包:`D:\下载\GravityShift_ZFlip_RollingBall_DocumentPack_v5`(v5 文档规范)、`D:\下载\GravityShift_UE582_RuntimePack_v6_RC1`(GPT 写的运行时包,未编译过,仅参照)

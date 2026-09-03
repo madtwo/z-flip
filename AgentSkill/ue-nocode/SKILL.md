@@ -40,7 +40,7 @@ description: 通过 UE5.8 原生 MCP 无代码操控虚幻编辑器的工作流�
 | Python 属性报错、类加载 None、枚举签名、bash→python 传参 | `reference/PYTHON_API_PITFALLS.md` |
 | 新项目接入、搬关卡、模板残留、场景资产行为、项目版图 | `reference/PROJECT_SETUP.md` |
 | 改 GravityShift C++(重力/翻转/摄像机/刚体)、评审翻转类代码 | `reference/GRAVITY_CPP_PATTERNS.md` |
-| 推 GitHub、git 被墙、建仓库、令牌 | `reference/GITHUB_SYNC.md` |
+| 推/拉 GitHub、git 被墙、建仓库、令牌、同步队友改动 | `reference/GITHUB_SYNC.md` |
 
 ## 红线十条(每条都真实踩过)
 

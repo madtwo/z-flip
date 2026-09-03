@@ -16,6 +16,7 @@ class UGSGravityBodyComponent;
 class UGSLandingProfile;
 class UGSLandingResponseComponent;
 class UGSResettableComponent;
+class UGSRailCameraComponent;
 class UGSSurfaceReceiverComponent;
 class USceneComponent;
 class USphereComponent;
@@ -57,6 +58,9 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "GravityShift|Components")
 	TObjectPtr<UGSResettableComponent> Resettable = nullptr;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "GravityShift|Components")
+	TObjectPtr<UGSRailCameraComponent> RailCamera = nullptr;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	TObjectPtr<UGSBallProfile> BallProfile = nullptr;
 
@@ -93,8 +97,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
 	FKey FlipGravityKey = EKeys::G;
 
+	// Interact moved from E to F: E is now the camera-distance key (Q/E).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
-	FKey InteractKey = EKeys::E;
+	FKey InteractKey = EKeys::F;
+
+	// Player camera-distance keys: Q pulls the rail camera closer, E sends it back.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
+	FKey TrailCloserKey = EKeys::Q;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
+	FKey TrailFartherKey = EKeys::E;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
 	FKey ResetKey = EKeys::R;
@@ -242,9 +254,12 @@ protected:
 	FVector TargetCameraUp = FVector::UpVector;
 	FQuat CurrentCameraRotation = FQuat::Identity;
 	bool bCameraRotationReady = false;
+	bool bRailCamActive = false;
 	bool bFlipKeyWasDown = false;
 	bool bInteractKeyWasDown = false;
 	bool bResetKeyWasDown = false;
+	bool bTrailCloserKeyWasDown = false;
+	bool bTrailFartherKeyWasDown = false;
 	bool bAxisSetXWasDown = false;
 	bool bAxisSetYWasDown = false;
 	bool bAxisSetZWasDown = false;

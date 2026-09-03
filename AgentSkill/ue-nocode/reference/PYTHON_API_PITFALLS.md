@@ -4,6 +4,8 @@
 
 ## 属性不存在(改用方法/别的对象)
 
+- **C++ UPROPERTY 的 bool `b` 前缀在 Python 里被剥掉**:`bLookAlongNegativeAxis` → `look_along_negative_axis`,`bSnapToGrid` → `snap_to_grid`。`set_editor_property('b_xxx', ...)` 会抛 "Failed to find property"(2026-09-03 实踩);同名字段先按去 b 前缀猜
+- **`unreal.Vector2D(a, b)` 参数序是 (X, Y)**:`set_move_input(Vector2D(0,-1))` 是"S 后退"不是"A 左移"(X=左右/A-D,Y=前后/W-S)。传反了测试结果"看起来像代码错了",2026-09-03 测墙面控制时白白浪费一轮排查——先打印/推敲再下结论
 - `StaticMeshComponent` **没有** `collision_enabled`/`collision_profile_name`/`use_ccd` 属性 → 用方法 `get_collision_enabled()`/`get_collision_object_type()`/`set_use_ccd(bool)`;或读 `get_editor_property("body_instance")`(BodyInstance 里才有 collision_enabled/object_type/collision_responses)
 - `StaticMesh` **没有** `collision_trace_flag`,它在 `mesh.get_editor_property("body_setup")` 上(建模网格碰撞根因见 PROJECT_SETUP.md)
 - `HitResult` 在本版本**不是 subscriptable**,用 `.to_dict()`

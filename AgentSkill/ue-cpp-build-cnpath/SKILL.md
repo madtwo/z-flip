@@ -96,9 +96,29 @@ UBT 5.8 是 .NET 10 程序。系统若只装了 .NET 6/8:
 4. **局部变量遮蔽类成员(C4458)** → UE 把 C4458 当 error。比如 `AActor::Owner` 是基类成员,局部 `AActor* Owner=...` 就中招。改名(Owner→OwnerActor)。
 5. **链接器偶发 LNK1201/LNK1136**:先 `-NoUBA`;还不行就 `rm -rf 项目/Intermediate 项目/Binaries/Win64 项目/Plugins/*/Intermediate 项目/Plugins/*/Binaries` 全清重来(残留的损坏 .lib/.pdb 会卡住增量编译)。
 
+### 3. 编辑器已关,UBT 仍报 "Unable to build while Live Coding is active"(2026-09-03 新坑)
+
+- **现象**:z-flip 编辑器已优雅退出(tasklist 确认无该进程),`taskkill //IM LiveCodingConsole.exe //F` 也做了,UBT 照样 5 秒失败退出码 6。
+- **根因**:UBT 的判定是 `Global\LiveCoding_<目标exe路径>` **全局命名互斥体**(HotReload.cs `IsLiveCodingSessionActive`),**任何**还在跑的 UnrealEditor 实例都会持有(包括没开项目的项目选择器窗口)。杀 LiveCodingConsole 没用,互斥体是编辑器进程建的。
+- **修复**:UBT 命令行加 **`-NoHotReloadFromIDE`**(`BuildConfiguration.bAllowHotReloadFromIDE=false`,跳过互斥体检查),不必杀别的编辑器窗口。完整命令=步骤 B 基础上追加该参数。
+- **注意**:若目标编辑器实例自己还开着,该参数也不该用——先正常关编辑器再编,这条只解"残留实例锁互斥体"的场景。
+
+## 步骤 F:改 C++ 后的"关→编→开"全流程(2026-09-03 实测,机械执行)
+
+编辑器开着 dll 被锁,C++ 迭代就是关→编→开的循环;流程熟练后全程 1-2 分钟。**顺序不能乱**:
+
+1. **先存盘再关**(用户常在地图里加东西):远程 python `unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)`,并打印 `get_dirty_content_packages()/get_dirty_map_packages()` 前后对比确认(空列表=用户已自己存过)
+2. **优雅退出**:`execute_console_command(None, 'QUIT_EDITOR')`,sleep 后 tasklist 确认进程没了。别 taskkill——优雅退出才会走保存/清理
+3. **编译**:步骤 B 命令;撞 "Unable to build while Live Coding is active" 见反哺坑 3(`-NoHotReloadFromIDE`);杀 LiveCodingConsole.exe 没用(互斥体是编辑器进程建的,残留编辑器实例都持有)
+4. **重启**:`cmd //c start "" "D:\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe" "<uproject>"`。**窗口标题几秒就出来 ≠ 加载完成**,别拿标题当就绪信号
+5. **MCP 必兜底**:自启十次九不起。轮询 `netstat 8000 LISTENING`(对 pid 确认是新编辑器进程),5 分钟没起就 `ue_pyexec.py` 组播发 `ModelContextProtocol.StartServer`(见 ue-nocode/CONNECT_MCP.md),几秒就绪
+6. **版本断言**:python `hasattr(unreal, '<本轮新增类名>')` 或新 API——证明跑的是新 dll,防"窗口开着但旧进程/旧模块"的假象
+
+
+
 ## 修完重编译
 
-UBT 增量,改完源码直接重跑步骤 B 的命令。只有改了 `.uplugin`/`Build.cs`/模块结构才需要清 Intermediate。
+UBT 增量,改完源码直接重跑步骤 B 的命令(改 C++ 后重启编辑器全流程见上面步骤 F)。只有改了 `.uplugin`/`Build.cs`/模块结构才需要清 Intermediate。
 
 ## 产物核对
 
@@ -129,6 +149,7 @@ UBT 增量,改完源码直接重跑步骤 B 的命令。只有改了 `.uplugin`/
 ├─ 用 Build.bat? → 别。直接 dotnet.exe 跑 UBT dll(步骤 B)
 ├─ UBA 报 Access denied / LNK1136/LNK1201? → 加 -NoUBA(步骤 C)
 ├─ .NET 版本不对? → 设 DOTNET_ROOT 指引擎内置 dotnet(步骤 D)
+├─ 编辑器已关仍报 Live Coding active? → 加 -NoHotReloadFromIDE(反哺坑 3)
 └─ 真实 C++ 错误? → 按步骤 E 套路修
 
 ---

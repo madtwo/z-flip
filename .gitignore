@@ -25,3 +25,4 @@ __pycache__/
 
 # Local-only skills (live copies used by Claude Code; not pushed to GitHub)
 .claude/skills/
+_sync_backup/

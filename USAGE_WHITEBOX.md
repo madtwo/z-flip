@@ -31,6 +31,20 @@
 | `GSKillVolume` | **房间上、下边界外各一个** | `VolumeExtent` 覆盖整个房间截面——重力会翻转,上下漏出去都要能重置 |
 | `GSCheckpoint` | 检查点 | 球碰到即记录复活点 |
 | `GSCollectible` / `GSFinishGoal` | 收集物 / 终点 | 配 DA_GS_Collectible_Default |
+| `GSCameraRail` | **每段相机导轨一根**(不摆则该关回落到旧跟随相机) | 细节见下节「相机导轨」;测试案例已有一根 `相机导轨_GS` |
+
+### 相机导轨(新式防晕相机,2026-09-03)
+
+原理:相机像**套在钢筋上的小环**——沿 `GSCameraRail` 的本地 Z 轴滑动跟随球,在横切面里的位置全程锁死;视角以**世界竖直为滚转基准**、只做小幅万向调整(偏航 ≤35°/俯仰 ≤50°,可调),随球上墙/上天花板自动微调俯仰,**重力翻转不再滚转整个画面**。
+
+摆法(每个新关卡):
+1. Place Actors 搜 `GS Camera Rail` 摆进关卡,移到导轨线位置,**旋转 Actor 使其本地 Z 轴沿轨道方向**(摆放窗口里盯 Z 轴箭头)
+2. `RailLength` = 轨道全长(中心对称,两端各一半);`bLookAlongNegativeAxis` 勾不勾决定相机朝 +Z 还是 −Z 看,**要朝房间内部看**
+3. `CrossOffsetHeightCm`:0=相机正好骑在轴心(默认,推荐);>0 沿世界竖直抬高
+4. 相机手感参数在**球身上的 `GSRailCameraComponent`**(偏航/俯仰限位、平滑速度、视线抬升 `AimOffsetUpCm` 等),全关通用,一般不用动
+5. 多段导轨直接首尾相接摆即可——组件自动选最近导轨、带 150cm 迟滞防抖,球出了所有导轨范围自动回落旧跟随相机
+
+测试案例现状:圆柱体参考件 `相机导轨`(无碰撞/游戏不显示)保留作视觉参照,旁边已摆好对应的 `相机导轨_GS`(轴线沿 X、长 6293、朝 −X 看进房间)。
 
 方块 Profile 三配方:`DA_GS_Block_Fixed`(定死)/`DA_GS_Block_Gravity`(随重力)/`DA_GS_Block_GravityBreaker`(撞击破坏者,CCD 已开)。赋完 Profile 调 `ApplyBlockProfile`(细节面板按钮或脚本调)生效。
 

@@ -4,13 +4,13 @@
 
 ## 当前架构速览(z-flip,v5)
 
-- 插件模块 `GravityShift`(21 类),项目模块 `ZFlip`;源码 `D:\UE\z-flip\Plugins\GravityShift\Source\GravityShift\{Public,Private}`
-- **重力只有两态**:`NEGATIVE_Z=(0,0,-1)` / `POSITIVE_Z=(0,0,1)`(枚举只暴露这两个,无 X/Y)
+- 插件模块 `GravityShift`(24 类),项目模块 `ZFlip`;源码 `D:\UE\z-flip\Plugins\GravityShift\Source\GravityShift\{Public,Private}`
+- **重力六方向(v6,2026-09-03 起)**:`EGSGravityDirection` ±X/±Y/±Z;Manager 新 API `RequestGravityDirection/SetGravityAxis/ToggleCurrentAxis`,旧 ±Z 极性 API 保留兼容;每关默认方向+允许轴由 WorldStateManager `Gravity|LevelConfig` 配置并三重时序兜底(详见项目 HANDOVER §11)
 - 玩家 = `AGSRollingBallPawn`(物理滚球,禁用内建重力,自定义加速度);**禁用 ACharacter/CharacterMovement**
 - 所有翻转走 `AGSGravityManager::CommitPolarity`(同步提交 + `OnGravityChanged` 广播 + revision++);GameMode `BeginPlay` 自动拉起 Manager 和 WorldStateManager(**不用手摆**)
 - 输入 = **Tick 轮询 `IsInputKeyDown` + 边缘检测**(WASD 滚动力矩、G 翻转、E 交互、R 重置),不依赖输入栈(原因见 PIE_TESTING.md)
-- 摄像机 = CameraPivot(绝对旋转)→ SpringArm → Camera,每 tick 从 Manager 读目标方向,`FQuat::Slerp` 插值(**禁 Euler 跨 180°**);球体/碰撞/网格不被翻转回调旋转(`DoesGravityFlipRotateBall()=false`)
-- 自动反向:落地/坠落超阈值(速度 1400 / 距离 2200 cm)经 Manager 以 `FALL_THRESHOLD`/`LANDING_RESPONSE` 翻回;一次飞行至多消耗一次自动反向
+- 摄像机双模式:关卡里有 `AGSCameraRail` → **轨相机**(相机套轨轴滑行、横切面锁死、滚转锁世界竖直、万向限位 35°/50°,PIE 核心验证见项目 HANDOVER §12);没有 → 旧跟随模式(CameraPivot 绝对旋转 → SpringArm → Camera,`FQuat::Slerp` 插值禁 Euler 跨 180°)。球体/碰撞/网格不被翻转回调旋转(`DoesGravityFlipRotateBall()=false`)
+- 自动反向:落地/坠落超阈值(落地速度 2000 cm)经 Manager 以 `FALL_THRESHOLD`/`LANDING_RESPONSE` 翻回;一次飞行至多消耗一次自动反向
 - 测试场景(z-flip 测试案例.umap):3×GSBlockBase(Fixed/Gravity/Breaker 带 Profile)+ GravitySwitch + 慢速 SurfaceVolume + 上下 KillVolume;BP 壳由 `Plugins/GravityShift/Content/Python/v5/install_blueprints.py` 生成(14 BP + 12 DA,零污染)
 
 ## 两个必查 bug 模式(2026-09-02 实修)
@@ -22,7 +22,13 @@
    修:`UGSGravityBodyComponent` 订阅 `OnGravityChanged`(`BeginPlay` AddUniqueDynamic / `EndPlay` Remove),handler 里 `TargetPrimitive->WakeRigidBody()`。
 3. **关卡摆放 Actor 的 BeginPlay 早于 GameMode 自动 spawn 的 Manager**(时序家族第三例,v2 的 EnableInput 丢失是第一例):BeginPlay 时 `FindGravityManager` 返回空 → 注册/订阅全跳过且**无重试** → 该 Actor 永远不响应翻转(`GetGravityDirection()` 空管理器时恒返回 -Z)。**验证信号:`get_registered_body_count()` 只有球一个 = 关卡 Actor 全没注册**。
    修:**懒绑定**——注册+订阅挪进 `RefreshReferences`(两者都幂等),`TickComponent` 里 manager 为空就重试。
+4. **不滚转的相机下,移动基向量别用 `Up×Forward`**(2026-09-03):轨相机 roll 锁世界竖直,重力翻转(Up 反向)会让 `Up×Forward` 右向量反向而画面不翻 → **天花板/墙面 A/D 镜像**(用户实测)。修:移动基向量直接取**相机自身 forward/right 投影到支撑面**(相机 right 恒等于屏幕右,任何姿态都对);滚转跟随型相机两种算法等价,不受影响。配套:验证时读"相机朝向"要用 **CameraComponent** 的 right,`get_component_by_class(SceneComponent)` 拿到的是根碰撞体(物理翻滚中),读出来全是误导。
    **评审"自定义重力+翻转"类代码先查这几处。**
+
+## UHT/编译期撞名(2026-09-03)
+
+- **组件新 UFUNCTION 撞基类名**:给 `UActorComponent` 子类加 `IsActive()` 的 UFUNCTION → UHT 报 "Override of UFUNCTION 'IsActive' in parent 'UActorComponent' cannot have a UFUNCTION()"。`UActorComponent` 已占用 `IsActive`;新组件方法避开 `Is*/Get*` 常用名,或先查基类(本次改名 `IsDriving`)。
+- **平滑/积分类 Tick 代码必须钳 dt**:`DeltaSeconds = FMath::Clamp(DeltaSeconds, 0.f, 0.1f)`——PIE 暂停恢复会给负 dt,指数平滑 α<0 会向目标反方向外推(现象:锁轴相机瞬间偏出后自愈,详见 PIE_TESTING.md 坑 2 旁注)。
 
 ## Profile 默认值覆盖链(改阈值要改对地方)
 

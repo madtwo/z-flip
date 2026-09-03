@@ -12,7 +12,7 @@
 
 ## REST 直传 = git-data 四步
 
-脚本已固化:`reference/push_via_api.py`(改顶部 `REPO`/`WORKDIR` 即复用;291 文件/130MB + 增量同步实测通过):
+脚本已固化:`reference/push_via_api.py`(支持传参 `python push_via_api.py owner/repo "D:/工作目录"`,默认仍是 madtwo/MyProject2;291 文件/130MB + 增量同步实测通过):
 
 1. **空仓库引导**:git-data 对完全空仓库一律 409(**GET /git/refs/heads/main 在空仓库上也是 409 而非 404**,别拿 409 当"分支已存在")→ `PUT /contents/README.md {message:"bootstrap", content:base64}` 先放一个文件
 2. **blobs**:逐文件 `POST /git/blobs` {content: base64, encoding:"base64"};先 `GET /git/blobs/<本地算的sha>` 预检,已传的跳过(增量同步只传改动)。本地可算 blob sha1:`sha1("blob <size>\0"+content)`
@@ -27,6 +27,24 @@
 - 无单文件 >50MB 就不用 LFS(130MB 项目直推没问题)
 - **历史对齐**:引导提交导致远端历史与本地不同(内容同、sha 异)。开代理后一次 `git fetch origin && git reset --hard origin/main` 对齐;期间继续增量同步没影响(脚本自动把新提交挂到远端 head 上)
 - 分支跟踪:`git config branch.main.remote origin` + `git config branch.main.merge refs/heads/main`(没有远端跟踪引用时 `--set-upstream-to` 会失败)
+
+## 拉取队友改动(REST 下行,2026-09-03 实测 ✅)
+
+git pull 在本网络同样是死路,下行也走 REST。两个脚本已固化:
+
+```bash
+cd C:/Users/20625/.zcode/skills/ue-nocode/reference
+export GH_TOKEN=$(powershell -NoProfile -ExecutionPolicy Bypass -File read_gh_cred.ps1 | tail -1)
+python pull_check_remote.py madtwo/z-flip [since_sha]   # 列提交+改动文件清单(只读)
+python pull_apply_remote.py madtwo/z-flip since_sha "D:/UE/z-flip"   # 备份+下载落盘+校验
+```
+
+- `pull_check_remote.py`:GET `/commits` + `/compare/<since>...main`,打印 status/+/-/文件名。**先看清单再动手**——若远端改了用户本地也在改的文件(如 umap),先 surface 别覆盖
+- `pull_apply_remote.py`:逐文件 GET `/git/blobs/<sha>` → base64 → 写盘;写前把本地旧版备份到 `<workdir>/_sync_backup/<head>/`;写后本地重算 blob sha1 校验;同时把 compare 返回的统一 diff 存成 `_patches.diff` 供读改动意图
+- **compare 接口本机实测响应里没有 `head_commit` 键**(只给 base/merge_base/commits)→ 取 head 用 `cmp["commits"][-1]["sha"]`,别盲取 KeyError
+- `files[].patch` 对小文件自带完整 unified diff,**读"队友改了什么"直接读 patch,不用二次下载**;新增文件 patch=全文
+- 落盘后必做两件核对:①grep 关键新符号确认内容真换了(别只看时间戳);②对比 `Binaries/*.dll` 与源码时间戳——**dll 落后源码=必须关编辑器重编才生效**(编辑器开着 dll 被锁,编不了)
+- 队友只推了源码时,新 .cpp/.h 无需改 Build.cs(UBT 自动收模块目录),但 dll 过期就跑不了新逻辑
 
 ## 流程坑(真踩)
 

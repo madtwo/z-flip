@@ -13,6 +13,7 @@
 #include "GSInteractable.h"
 #include "GSLandingResponseComponent.h"
 #include "GSProfiles.h"
+#include "GSRailCameraComponent.h"
 #include "GSResettableComponent.h"
 #include "GSSurfaceReceiverComponent.h"
 #include "GSWorldState.h"
@@ -76,6 +77,7 @@ AGSRollingBallPawn::AGSRollingBallPawn()
 	SurfaceReceiver = CreateDefaultSubobject<UGSSurfaceReceiverComponent>(TEXT("SurfaceReceiver"));
 	LandingResponse = CreateDefaultSubobject<UGSLandingResponseComponent>(TEXT("LandingResponse"));
 	Resettable = CreateDefaultSubobject<UGSResettableComponent>(TEXT("Resettable"));
+	RailCamera = CreateDefaultSubobject<UGSRailCameraComponent>(TEXT("RailCamera"));
 
 	LandingResponseRef = LandingResponse;
 }
@@ -242,6 +244,31 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 		return;
 	}
 
+	// Rail camera: the position rides the level's camera rail and the view is
+	// rebuilt around world up with a small clamped gimbal. The chase rig below
+	// stays as the fallback for levels without a rail.
+	FVector RailPosition = FVector::ZeroVector;
+	FQuat RailRotation = FQuat::Identity;
+	if (RailCamera && RailCamera->ComputeCameraPose(RailPosition, RailRotation, DeltaSeconds))
+	{
+		if (!bRailCamActive)
+		{
+			bRailCamActive = true;
+			CameraArm->bDoCollisionTest = false;
+			CameraArm->TargetArmLength = 0.0f;
+		}
+		CameraPivot->SetWorldLocationAndRotation(RailPosition, RailRotation);
+		CurrentCameraUp = RailRotation.RotateVector(FVector::UpVector);
+		return;
+	}
+
+	if (bRailCamActive)
+	{
+		bRailCamActive = false;
+		CameraArm->bDoCollisionTest = true;
+		CameraArm->TargetArmLength = CameraArmLengthCm;
+	}
+
 	TargetCameraUp = bCameraFlipsWithGravity ? -GetActiveGravityDirection() : FVector::UpVector;
 	const FQuat Target = BuildCameraRotation(TargetCameraUp);
 
@@ -290,14 +317,43 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 	}
 
 	const FVector Up = -GetActiveGravityDirection();
+	const FVector GravityDir = -Up;
+
+	// Camera-relative movement basis: project the camera's OWN forward/right onto
+	// the support plane. Deriving Right as Up x Forward flips it whenever Up flips,
+	// while the rail camera keeps its world-up roll — A/D ended up mirrored on the
+	// ceiling. The camera's right vector matches the screen on every surface.
 	FVector Forward = CameraPivot ? CameraPivot->GetForwardVector() : GetActorForwardVector();
+	FVector Right = CameraPivot ? CameraPivot->GetRightVector() : FVector::CrossProduct(Up, Forward);
+
+	if (CameraPivot && FMath::Abs(Up.Z) < 0.5f)
+	{
+		// Wall: the camera's right is perpendicular to the wall, so the generic
+		// projection collapses. Control spec: W/S roll horizontally along the
+		// wall; A/D climb/descend — A climbs on the screen-left wall, D climbs on
+		// the screen-right wall (gravity toward the camera's right = right wall).
+		FVector Horizontal = FVector(Forward.X, Forward.Y, 0.0f);
+		if (Horizontal.Normalize())
+		{
+			Forward = Horizontal;
+			const float SideSign = FVector::DotProduct(GravityDir, CameraPivot->GetRightVector()) >= 0.0f ? 1.0f : -1.0f;
+			Right = FVector(0.0, 0.0, SideSign);
+		}
+		// Degenerate (camera faces straight into the wall plane): keep the
+		// generic projected basis computed above.
+	}
+
 	Forward = Forward - Up * FVector::DotProduct(Forward, Up);
 	if (!Forward.Normalize())
 	{
 		Forward = GetActorForwardVector();
+		Right = FVector::CrossProduct(Up, Forward);
 	}
-
-	const FVector Right = FVector::CrossProduct(Up, Forward);
+	Right = Right - Up * FVector::DotProduct(Right, Up);
+	if (!Right.Normalize())
+	{
+		Right = FVector::CrossProduct(Up, Forward);
+	}
 	FVector Desired = Forward * MoveInput.Y + Right * MoveInput.X;
 	if (!Desired.Normalize())
 	{
@@ -349,9 +405,14 @@ void AGSRollingBallPawn::PollNativeInput()
 	float MouseX = 0.0f;
 	float MouseY = 0.0f;
 	PC->GetInputMouseDelta(MouseX, MouseY);
-	if (!FMath::IsNearlyZero(MouseX) || !FMath::IsNearlyZero(MouseY))
+	// Rail mode owns the camera; accumulated mouse offsets only apply to the
+	// chase rig, otherwise they would suddenly apply on the next rail handoff.
+	if (!RailCamera || !RailCamera->IsDriving())
 	{
-		AddCameraLookInput(MouseX * CameraYawDegreesPerMouseUnit, -MouseY * CameraPitchDegreesPerMouseUnit);
+		if (!FMath::IsNearlyZero(MouseX) || !FMath::IsNearlyZero(MouseY))
+		{
+			AddCameraLookInput(MouseX * CameraYawDegreesPerMouseUnit, -MouseY * CameraPitchDegreesPerMouseUnit);
+		}
 	}
 
 	const float AxisX = (PC->IsInputKeyDown(RightKey) ? 1.0f : 0.0f) - (PC->IsInputKeyDown(LeftKey) ? 1.0f : 0.0f);
@@ -378,6 +439,27 @@ void AGSRollingBallPawn::PollNativeInput()
 		ResetToCheckpoint();
 	}
 	bResetKeyWasDown = bResetDown;
+
+	// Player camera-distance keys: each press steps the rail camera's trail.
+	const bool bTrailCloserDown = PC->IsInputKeyDown(TrailCloserKey);
+	if (bTrailCloserDown && !bTrailCloserKeyWasDown)
+	{
+		if (RailCamera)
+		{
+			RailCamera->AdjustTrailDistance(-1.0f);
+		}
+	}
+	bTrailCloserKeyWasDown = bTrailCloserDown;
+
+	const bool bTrailFartherDown = PC->IsInputKeyDown(TrailFartherKey);
+	if (bTrailFartherDown && !bTrailFartherKeyWasDown)
+	{
+		if (RailCamera)
+		{
+			RailCamera->AdjustTrailDistance(1.0f);
+		}
+	}
+	bTrailFartherKeyWasDown = bTrailFartherDown;
 
 	// Set-axis keys 1/2/3 snap gravity to the positive direction of that axis.
 	const bool bAxisSetXDown = PC->IsInputKeyDown(AxisSetXKey);
