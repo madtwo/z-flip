@@ -1,13 +1,16 @@
 #include "GSInteractables.h"
 
 #include "Components/BoxComponent.h"
+#include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
 #include "UObject/ConstructorHelpers.h"
 
 #include "GSGravityManager.h"
 #include "GSLandingResponseComponent.h"
 #include "GSProfiles.h"
+#include "GSRollingBallPawn.h"
 #include "GSSurfaceReceiverComponent.h"
 
 // ---------------------------------------------------------------------------------
@@ -465,4 +468,241 @@ bool AGSSurfaceControllerDevice::Interact_Implementation(APawn* InstigatorPawn)
 FText AGSSurfaceControllerDevice::GetInteractionText_Implementation(APawn* InstigatorPawn)
 {
 	return FText::FromString(TEXT("Surface Controller (E)"));
+}
+
+// ---------------------------------------------------------------------------------
+// Pickup item
+// ---------------------------------------------------------------------------------
+
+AGSPickupItem::AGSPickupItem()
+{
+	PrimaryActorTick.bCanEverTick = false;
+
+	Mesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Mesh"));
+	// NoCollision by default: pickups are collected by proximity + F, not by being
+	// physical obstacles. Give the mesh a Blocking profile in the BP if it should
+	// double as a prop the ball can rest against.
+	Mesh->SetCollisionProfileName(TEXT("NoCollision"));
+	Mesh->SetGenerateOverlapEvents(false);
+	SetRootComponent(Mesh);
+
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeAsset(TEXT("/Engine/BasicShapes/Cube.Cube"));
+	if (CubeAsset.Succeeded())
+	{
+		Mesh->SetStaticMesh(CubeAsset.Object);
+		Mesh->SetRelativeScale3D(FVector(0.4f));
+	}
+}
+
+void AGSPickupItem::BeginPlay()
+{
+	Super::BeginPlay();
+	bInitialCollected = bIsCollected;
+}
+
+bool AGSPickupItem::CanInteract_Implementation(APawn* InstigatorPawn)
+{
+	return !bIsCollected && InstigatorPawn != nullptr;
+}
+
+bool AGSPickupItem::Collect(APawn* Collector)
+{
+	if (bIsCollected)
+	{
+		return false;
+	}
+
+	bIsCollected = true;
+	Mesh->SetHiddenInGame(true);
+	Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	// Pause input with a center-screen message so the player can read it. The ball
+	// simply stops receiving move input (physics coasts it to rest); it is not frozen.
+	if (AGSRollingBallPawn* Ball = Cast<AGSRollingBallPawn>(Collector))
+	{
+		if (!PickupMessage.IsEmpty())
+		{
+			Ball->ShowMessageAndLock(PickupMessage);
+		}
+	}
+
+	return true;
+}
+
+bool AGSPickupItem::Interact_Implementation(APawn* InstigatorPawn)
+{
+	return Collect(InstigatorPawn);
+}
+
+FText AGSPickupItem::GetInteractionText_Implementation(APawn* InstigatorPawn)
+{
+	if (bIsCollected)
+	{
+		return FText::GetEmpty();
+	}
+	return FText::FromString(TEXT("拾取 (F)"));
+}
+
+void AGSPickupItem::RestoreInitialState()
+{
+	bIsCollected = bInitialCollected;
+	Mesh->SetHiddenInGame(false);
+	Mesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+}
+
+// ---------------------------------------------------------------------------------
+// Key
+// ---------------------------------------------------------------------------------
+
+AGSKey::AGSKey()
+{
+	// Keys behave exactly like pickups but unlock matching doors. Give the pickup
+	// logic a sensible default read-out so a bare key already tells the player why.
+	PickupMessage = FText::FromString(TEXT("你找到了一把钥匙，匹配的门被打开了。"));
+}
+
+bool AGSKey::Interact_Implementation(APawn* InstigatorPawn)
+{
+	const bool bSuccess = Super::Interact_Implementation(InstigatorPawn);
+	if (bSuccess && !KeyID.IsNone())
+	{
+		if (UWorld* World = GetWorld())
+		{
+			for (TActorIterator<AGSDoor> It(World); It; ++It)
+			{
+				if (AGSDoor* Door = *It)
+				{
+					Door->TryUnlock(KeyID);
+				}
+			}
+		}
+	}
+	return bSuccess;
+}
+
+FText AGSKey::GetInteractionText_Implementation(APawn* InstigatorPawn)
+{
+	if (bIsCollected)
+	{
+		return FText::GetEmpty();
+	}
+	return FText::FromString(TEXT("拾取钥匙 (F)"));
+}
+
+// ---------------------------------------------------------------------------------
+// Door
+// ---------------------------------------------------------------------------------
+
+AGSDoor::AGSDoor()
+{
+	PrimaryActorTick.bCanEverTick = true;
+
+	DoorRoot = CreateDefaultSubobject<USceneComponent>(TEXT("DoorRoot"));
+	SetRootComponent(DoorRoot);
+
+	DoorMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("DoorMesh"));
+	DoorMesh->SetupAttachment(DoorRoot);
+	DoorMesh->SetCollisionProfileName(TEXT("BlockAllDynamic"));
+	DoorMesh->SetGenerateOverlapEvents(false);
+
+	// Default: a door panel whose base sits at DoorRoot. Swap the mesh/scale in BP.
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeAsset(TEXT("/Engine/BasicShapes/Cube.Cube"));
+	if (CubeAsset.Succeeded())
+	{
+		DoorMesh->SetStaticMesh(CubeAsset.Object);
+		DoorMesh->SetRelativeScale3D(FVector(1.6f, 0.3f, 2.2f));
+		DoorMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 110.0f));
+	}
+}
+
+void AGSDoor::BeginPlay()
+{
+	Super::BeginPlay();
+	bInitialLocked = bIsLocked;
+
+	// A designer can start a door already unlocked; seat the panel at the open pose.
+	if (!bIsLocked && DoorMesh)
+	{
+		SlideAlpha = 1.0f;
+		DoorMesh->SetRelativeLocation(SlideOffset);
+	}
+}
+
+bool AGSDoor::TryUnlock(FName KeyID)
+{
+	if (!bIsLocked)
+	{
+		return true;
+	}
+	if (RequiredKeyID != KeyID)
+	{
+		return false;
+	}
+	bIsLocked = false;
+	return true;
+}
+
+void AGSDoor::SetLocked(bool bNowLocked)
+{
+	bIsLocked = bNowLocked;
+}
+
+void AGSDoor::RestoreInitialState()
+{
+	// Closing back to locked is driven by Tick once bIsLocked returns true.
+	bIsLocked = bInitialLocked;
+}
+
+bool AGSDoor::CanInteract_Implementation(APawn* InstigatorPawn)
+{
+	return InstigatorPawn != nullptr && bIsLocked;
+}
+
+bool AGSDoor::Interact_Implementation(APawn* InstigatorPawn)
+{
+	if (!bIsLocked)
+	{
+		return false;
+	}
+
+	// Pressing F on a locked door just explains the situation; no lock consumed.
+	if (AGSRollingBallPawn* Ball = Cast<AGSRollingBallPawn>(InstigatorPawn))
+	{
+		if (!LockedMessage.IsEmpty())
+		{
+			Ball->ShowMessageAndLock(LockedMessage);
+		}
+	}
+	return true;
+}
+
+FText AGSDoor::GetInteractionText_Implementation(APawn* InstigatorPawn)
+{
+	if (!bIsLocked)
+	{
+		return FText::GetEmpty();
+	}
+	return FText::FromString(TEXT("锁住的门"));
+}
+
+void AGSDoor::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	const float Target = bIsLocked ? 0.0f : 1.0f;
+	if (FMath::IsNearlyEqual(SlideAlpha, Target, 0.001f))
+	{
+		SlideAlpha = Target;
+		return;
+	}
+
+	const float Step = (SlideDuration > KINDA_SMALL_NUMBER) ? (DeltaSeconds / SlideDuration) : 1.0f;
+	SlideAlpha = bIsLocked
+		? FMath::Max(SlideAlpha - Step, 0.0f)
+		: FMath::Min(SlideAlpha + Step, 1.0f);
+
+	if (DoorMesh)
+	{
+		DoorMesh->SetRelativeLocation(FMath::Lerp(FVector::ZeroVector, SlideOffset, SlideAlpha));
+	}
 }

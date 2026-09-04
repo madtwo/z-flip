@@ -1,8 +1,9 @@
 # GravityShift v5 — 进度同步 / 交接文档（z-flip 项目）
 
-> 更新时间：2026-09-03 深夜 (GMT+8)
+> 更新时间：2026-09-04 (GMT+8)
 > 状态：v5 已验收（§8-§10）；v6 六方向已同步本机并编译（§11；+Y 贴墙/G 两墙摆荡已 PIE 抽测通过，§11.9 全用例矩阵仍待实机）；**§12 = 导轨相机(防晕)+ 全表面操作映射 + Q/E 玩家调距,PIE 验证通过,待用户完整手感验收**
-> **§13 = 2026-09-04 本轮交付：障碍物物理砸碎修复(根因 tick 自检+PIE 15369J)+ 玩家球落地三带网格联动(≤4格安静/5-6格反弹/≥7格反重力,弹回4格)**,均 Live Coding+PIE 验证通过;实机手感 & 前台 7格边界验收待用户
+> **§13 = 2026-09-04 第七轮交付：障碍物物理砸碎修复(根因 tick 自检+PIE 15369J)+ 玩家球落地三带网格联动(≤4格安静/5-6格反弹/≥7格反重力,弹回4格)**,均 Live Coding+PIE 验证通过;实机手感 & 前台 7格边界验收待用户
+> **§14 = 2026-09-04 第八轮交付：拾取物品 + 拾取钥匙开门(F 交互/拾取锁屏消息空格继续/门按 RequiredKeyID 配对/滑开动画/死亡重置回锁复位)**,UBT 编译通过 + PIE 全用例验收(18/18 断言 + 滑门开/关时序);详见 §14,剩一处已知滑门落座偏差见 §14.6
 > 写这份文档的目的：先把做到哪、卡在哪、改了什么、踩了什么雷同步清楚，供人工诊断。
 
 ---
@@ -409,3 +410,78 @@ Manager 由 GameMode BeginPlay 自动 spawn,BeginPlay **可能延迟到下一 ti
 - 障碍物破坏 = 纯 tick 自检,无需引擎 Hit 事件;想调灵敏度改 `GSGravityBodyComponent` 里匿名命名空间 `TickImpactDetectSpeedCm`(现 100)。相关能量/阈值/标签链见既有 Breakable 体系。
 - 想确认 7格边界:让用户前台跑 PIE 从 7格顶自由落一次(应反转),或任何 ≥30fps 环境按 §13.5 表重测。
 - 详细记忆已存 `.claude/.../memory/`:`physical-break-path-not-firing`(砸碎根因)、`grid-linked-landing-bands`(网格联动 + 节流/autosave 两雷)。
+
+---
+
+## 14. 2026-09-04 第八轮:拾取物品 + 拾取钥匙开门(编译通过 + PIE 全用例验收)
+
+> 本轮交付一条交互链:**F 交互拾取物 → 屏幕中央消息 + 输入锁屏(空格继续)→ 钥匙拾取按 ID 打开匹配的门(滑开动画)→ 死亡/世界重置回锁复位**。全部 C++ 落地,UBT 编译通过,按交付要求写的测试用例在 PIE 自动跑通(逻辑 18/18 + 滑门时序)。工作树 = 6 个源码改动文件(见 §14.3),**未 commit**;关卡 0 污染(§14.6 雷 3 自动存盘已回退)。
+
+### 14.1 需求(用户规格要点)
+
+- **拾取物 AGSPickupItem**:F 交互拾取 → 屏幕中央显示一句提示,**锁住玩家输入直到按空格继续**(锁的是输入,球靠物理自然滑停,不冻结)。
+- **AGSKey + AGSDoor**:钥匙拾取后,**所有 `RequiredKeyID` 匹配的门被打开**(门体滑开);支持钥匙/门/拾取物随**世界重置**回到初始(死亡后重新上锁、钥匙复位)。
+- 附带:交互提示/中央消息 HUD 绘制;给设计器写配对指南与测试用例(§14.5 即据此实跑)。
+
+### 14.2 实现与关键设计决策
+
+交互检测沿用项目既有的 **无碰撞距离判定**:`GSRollingBallPawn::FindBestInteractable()` 世界扫描 + `IGSInteractable::Execute_CanInteract` 过滤(本次把过滤加进扫描,已收集隐藏拾取物不再遮蔽别的目标),半径 `InteractionRadiusCm=320`,F 键 `TryInteract()` 触发,全部走轮询边缘检测(项目反 BindAction 的既有约定)。
+
+**与最初规格字面的偏差(实现定案)**:
+1. **不 Destroy,只隐藏**:规格最初写收集即销毁,但销毁后世界重置无法找回 → 改成 `SetHiddenInGame + 关碰撞`,重置时 `RestoreInitialState` 重新武装(与 AGSCollectible 同款语义)。
+2. **Interact 返回 bool**(不是 void):界面签名 `bool Interact(APawn*)`,收集/开门成不成功都要反馈。
+3. **无 TMap/门状态表**:规格的 KeyDoorMap 集中配对 → 改为**每扇门自带 `RequiredKeyID`**,钥匙 Interact 里 `TActorIterator<AGSDoor>` 全图广播 `TryUnlock(KeyID)`。一对多/多对一自然成立,少一层管理状态。
+4. **"暂停"= 输入抑制**:球不人为冻结,只是锁帧期间不给移动输入(物理让它自然滑停)。中央消息仅当 `PickupMessage` 非空才锁屏(空消息=静默收集,设计器可选)。
+
+**新增公开 API**:
+- `AGSPickupItem`(`GSInteractables.h/.cpp` 追加):Mesh 根(NoCollision,默认立方 0.4)+ `PickupMessage`(FText)+ `bIsCollected`;`Collect(APawn*)->bool`(置已收集/隐藏/关碰撞 → 有消息则 `ShowMessageAndLock`)、`RestoreInitialState()`;BeginPlay 快照 `bInitialCollected`。
+- `AGSKey : AGSPickupItem`:ctor 预置默认提示「你找到了一把钥匙,匹配的门被打开了。」;`Interact` 先 `Super`(拾取+锁屏)再全图解锁;`KeyID`(FName)。
+- `AGSDoor`:DoorRoot 场景根 + DoorMesh 子件(BlockAllDynamic,默认立方 scale (1.6,0.3,2.2) @ Z=110);`RequiredKeyID` / `bIsLocked`(默认 true)/ `SlideOffset`(默认 240)/ `SlideDuration`(0.8);`TryUnlock(FName)->bool`(同 ID 才开)、`SetLocked`、`RestoreInitialState`;`CanInteract` 仅锁着时可交互(解锁后不再是目标),锁着时按 F 若有 `LockedMessage` 则弹提示;`Tick` 驱动 DoorMesh 在 关位↔SlideOffset 间插值滑动。
+- **Pawn 锁屏**:`ShowMessageAndLock/GetPendingMessage/IsMessageLocked/GetMessageDismissKey/DismissPendingMessage` + `DismissMessageKey`(默认 Space);Tick 锁帧分支只监听空格上升沿。
+- **HUD**(`GSFramework.cpp`):锁屏时中央画 `GetPendingMessage()`(SizeY*0.4)+ 下方「按 空格 继续」。
+- **世界重置**(`GSWorldState.cpp` `ResetWorld`):对 `AGSPickupItem`/`AGSDoor` 各调 `RestoreInitialState`;若玩家锁屏被重置则顺带 `DismissPendingMessage`(防死在消息态)。
+
+### 14.3 改动文件清单(6 个,未 commit)
+
+- 改 `Public/GSInteractables.h`(+125)、`Private/GSInteractables.cpp`(+240):追加上述三类实现。
+- 改 `Public/GSRollingBallPawn.h`(+25)、`Private/GSRollingBallPawn.cpp`(+70):锁屏消息五件套 + DismissMessageKey + Tick 锁帧分支 + `FindBestInteractable` 加 CanInteract 过滤。
+- 改 `Private/GSFramework.cpp`(+20):HUD 中央消息绘制。
+- 改 `Private/GSWorldState.cpp`(+20):ResetWorld 拾取物/门复位 + 玩家消息解除。
+
+### 14.4 行为契约
+
+- 门是**全局按 ID 配对**,无距离/无配对表:任何地方捡到 KeyA,全图所有 `RequiredKeyID=KeyA` 的门同时滑开;捡钥匙不捡拾到的那一扇负责解锁全部同名门。
+- 重置把门 `bIsLocked` 打回 `bInitialLocked`,滑门动画由 Tick 反向滑回(需世界 tick,重置瞬间状态已回锁、门板随后合拢)。
+- 门不具物理模拟(静态),解锁前后都原地;DoorMesh BlockAllDynamic,锁着时是真实路障。
+
+### 14.5 PIE 验收记录(测试案例地图,临时摆场未存盘)
+
+测法:编辑器层在 z=50000 高空摆隔离簇(避开房间几何/夹层 KillVolume)→ StartPIE → `set_game_paused(True)` 冻结 → 脚本把球瞬移到目标旁逐条断言(距离判定在冻结帧内瞬时成立,免去物理漂移)→ 滑门/合拢两段单独放行真实秒数再读。Python 反射注意:UE Python 类名去 A 前缀(`GSDoor/GSKey/GSPickupItem`),bool 属性去 b 前缀(`is_locked`)。
+
+| 用例 | 结果 |
+|---|---|
+| 靠近 + F 拾取(LK:`__LockOnly__` 钥匙,专测锁屏不碰门) | ✅ TryInteract true、`is_collected` true |
+| 拾取后隐藏/不再可二次拾取 | ✅ 再 TryInteract 被 CanInteract gate 拒 |
+| 中央消息 + 输入锁 | ✅ `is_message_locked()` true,`GetPendingMessage()` 返回原文「你找到了一把钥匙…」 |
+| 空格解除 | ✅ `DismissPendingMessage()` 后解锁 |
+| `RestoreInitialState` 重新武装 | ✅ 可再拾取 |
+| KeyA 开门 | ✅ DoorA1/A2(`RequiredKeyID=KeyA`)解锁,**DoorB(KeyB)仍锁** |
+| KeyB 开门 | ✅ DoorB 解锁,A 门保持已开 |
+| 滑开动画(真实时间) | ✅ 放行 ~1.6s 后 DoorMesh rel z 0→**240**(=SlideOffset,alpha=1) |
+| 死亡重置回卷 | ✅ `ResetWorld()` 后三钥匙复位、三门重锁、消息清空、球回 checkpoint |
+| 滑回合拢 | ✅ 重置放行 ~1.6s 后 rel z 240→**0**,重锁 |
+
+逻辑断言 **18/18 全过** + 开/关两段滑门时序读数符合预期。F/空格键的 OS 级按键注入未代测(沿用项目既验证过的轮询链路,空格由 `DismissPendingMessage` 直调覆盖;交互实体实机游玩留用户)。
+
+### 14.6 已知限制 / 本轮新发现的雷
+
+1. **滑门落座基准不一致(本轮实测暴露的真 bug,用户拍板暂不修,记录在案)**:门动画在 `Lerp(Zero, SlideOffset)` 间插值,而构造函数把 DoorMesh 初始座在相对 Z=110。后果——解锁首帧门板会先瞬落 ~110 再上滑;经历一次开→关循环后,关闭态停在 rel z=0(比初始落座低 110)。浮空测试簇不可见,真关卡里若门根贴地会半截埋地。**修法(一行方向,未实施)**:BeginPlay 记录 `ClosedMeshOffset = DoorMesh 当前相对位置`,`Tick` 改在 `ClosedMeshOffset ↔ ClosedMeshOffset+SlideOffset` 间插值(开态 350、关态回到 110)。要修需重启编辑器→重编→重跑 §14.5 滑门两段确认。
+2. 拾取物 `CanInteract` 是距离判定,**无视线遮挡检测**:隔着墙在 320cm 内也能 F 拾取。如需按当前体系规则补 LOS,后续加。
+3. **编辑器自动存盘污染关卡(第 §13.6 雷 3 复发)**:本轮在编辑器层摆测试簇 + PIE,编辑器把 `Content/测试案例.umap` 自动存出 +13.5KB diff(即使事后 destroy 也只清内存)。已按既定处置 `git checkout` 回退该 umap,工作树只剩 6 个源码改动。**教训照旧:凡涉及编辑器摆场/PIE,跑完查 umap 是否被 autosave,别把脏关卡留在工作区。**
+
+### 14.7 给下一个 AI
+
+- 摆一对钥匙/门:放一个 `AGSDoor`,Details 填 `RequiredKeyID`(如 `KeyA`);放一个 `AGSKey`,填同 `KeyID`。想"一扇门需要多把不同钥匙"→ 当前模型是"任一同 ID 钥匙即开",需升级再加。
+- 中央锁屏提示可选:拾取物 `PickupMessage` 留空 = 静默收集不锁屏;钥匙 ctor 自带默认文案。锁屏键在球 Pawn 的 `DismissMessageKey`(默认 Space),HUD 提示文案在 `GSFramework.cpp`。
+- 想确认滑门修正:等用户决定后按 §14.6-1 一行改,重启编辑器重编,PIE 摆一扇门捡钥匙看 rel z 350 / 重置后回 110。
+- 工作树 6 文件 = §14.3 全部本轮产出,未 commit(如需推送另说)。

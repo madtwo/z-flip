@@ -101,6 +101,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
 	FKey InteractKey = EKeys::F;
 
+	// Dismisses a center-screen pickup message (see ShowMessageAndLock).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
+	FKey DismissMessageKey = EKeys::SpaceBar;
+
 	// Player camera-distance keys: Q pulls the rail camera closer, E sends it back.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
 	FKey TrailCloserKey = EKeys::Q;
@@ -217,6 +221,23 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
 	FText GetCurrentInteractionText() const;
 
+	// Shows Message center-screen and suppresses gameplay input until the player
+	// presses DismissMessageKey. Used by pickups/key hints.
+	UFUNCTION(BlueprintCallable, Category = "GravityShift")
+	void ShowMessageAndLock(const FText& Message);
+
+	UFUNCTION(BlueprintCallable, Category = "GravityShift")
+	void DismissPendingMessage();
+
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
+	bool IsMessageLocked() const;
+
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
+	FText GetPendingMessage() const;
+
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
+	FKey GetMessageDismissKey() const;
+
 	UFUNCTION(BlueprintCallable, Category = "GravityShift")
 	void ResetToCheckpoint();
 
@@ -263,6 +284,10 @@ protected:
 	bool bAxisSetXWasDown = false;
 	bool bAxisSetYWasDown = false;
 	bool bAxisSetZWasDown = false;
+	bool bDismissKeyWasDown = false;
+
+	bool bInputLocked = false;
+	FText PendingMessage;
 
 	float AxisHintExpireTime = -1.0f;
 	FString AxisHintText;

@@ -488,9 +488,71 @@ void AGSRollingBallPawn::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
+	if (bInputLocked)
+	{
+		// A center-screen message is up: suppress all gameplay input (roll/flip/
+		// interact/reset/axis). The ball is not force-frozen - it simply gets no
+		// move input, so it coasts/brakes to rest naturally. Only the dismiss key
+		// is watched while locked.
+		const APlayerController* PC = Cast<APlayerController>(GetController());
+		const bool bDismiss = PC && PC->IsInputKeyDown(DismissMessageKey);
+		if (bDismiss && !bDismissKeyWasDown)
+		{
+			DismissPendingMessage();
+		}
+		bDismissKeyWasDown = bDismiss;
+
+		if (!bInputLocked)
+		{
+			// Dismissed this frame - fall through to a normal pass so a held
+			// movement key resumes immediately.
+		}
+		else
+		{
+			ApplyMovement(DeltaSeconds);
+			UpdateCamera(DeltaSeconds);
+			return;
+		}
+	}
+	else
+	{
+		bDismissKeyWasDown = false;
+	}
+
 	PollNativeInput();
 	ApplyMovement(DeltaSeconds);
 	UpdateCamera(DeltaSeconds);
+}
+
+void AGSRollingBallPawn::ShowMessageAndLock(const FText& Message)
+{
+	PendingMessage = Message;
+	bInputLocked = true;
+	SetMoveInput(FVector2D::ZeroVector);
+}
+
+void AGSRollingBallPawn::DismissPendingMessage()
+{
+	if (bInputLocked)
+	{
+		bInputLocked = false;
+		PendingMessage = FText::GetEmpty();
+	}
+}
+
+bool AGSRollingBallPawn::IsMessageLocked() const
+{
+	return bInputLocked;
+}
+
+FText AGSRollingBallPawn::GetPendingMessage() const
+{
+	return PendingMessage;
+}
+
+FKey AGSRollingBallPawn::GetMessageDismissKey() const
+{
+	return DismissMessageKey;
 }
 
 void AGSRollingBallPawn::SetMoveInput(FVector2D NewMoveInput)
@@ -595,10 +657,18 @@ AActor* AGSRollingBallPawn::FindBestInteractable() const
 	AActor* Best = nullptr;
 	float BestDistanceSq = InteractionRadiusCm * InteractionRadiusCm;
 
+	APawn* SelfPawn = const_cast<AGSRollingBallPawn*>(this);
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
 		AActor* Candidate = *It;
 		if (!Candidate || Candidate == this || !Candidate->GetClass()->ImplementsInterface(UGSInteractable::StaticClass()))
+		{
+			continue;
+		}
+
+		// Skip candidates that currently refuse interaction (collected-and-hidden
+		// pickups, exhausted switches) so they don't shadow a valid target nearby.
+		if (!IGSInteractable::Execute_CanInteract(Candidate, SelfPawn))
 		{
 			continue;
 		}

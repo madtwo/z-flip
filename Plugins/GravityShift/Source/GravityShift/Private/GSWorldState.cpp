@@ -10,8 +10,10 @@
 #include "GSBreakableComponent.h"
 #include "GSGravityManager.h"
 #include "GSGridSnapComponent.h"
+#include "GSInteractables.h"
 #include "GSProfiles.h"
 #include "GSResettableComponent.h"
+#include "GSRollingBallPawn.h"
 
 // ---------------------------------------------------------------------------------
 // World state manager
@@ -216,6 +218,17 @@ void AGSWorldStateManager::ResetWorld()
 		{
 			Collectible->RestoreCheckpointState();
 		}
+
+		// Pickups/keys are re-armed and every keyed door re-locks on reset: death
+		// rewinds key progress to the level-start state (same rule as collectibles).
+		if (AGSPickupItem* Pickup = Cast<AGSPickupItem>(Actor))
+		{
+			Pickup->RestoreInitialState();
+		}
+		else if (AGSDoor* Door = Cast<AGSDoor>(Actor))
+		{
+			Door->RestoreInitialState();
+		}
 	}
 
 	if (RegisteredPlayer && HasActiveCheckpoint)
@@ -225,6 +238,13 @@ void AGSWorldStateManager::ResetWorld()
 		{
 			Resettable->TeleportAndReset(ActiveCheckpointTransform);
 		}
+	}
+
+	// A reset can happen while a pickup message is up (ball rolled into a kill
+	// volume mid-read). Clear the lock so the player isn't stuck on respawn.
+	if (AGSRollingBallPawn* BallPawn = Cast<AGSRollingBallPawn>(RegisteredPlayer))
+	{
+		BallPawn->DismissPendingMessage();
 	}
 
 	// After everything is restored, re-align grid-snapped blocks so a reset puts

@@ -118,6 +118,26 @@ void AGSGravityHUD::DrawHUD()
 		return;
 	}
 
+	// While a pickup/key/door message holds the player's input, draw it center-screen
+	// and suppress the corner debug block so the text reads cleanly.
+	if (Ball->IsMessageLocked())
+	{
+		UFont* Font = GEngine->GetMediumFont();
+		const FString Message = Ball->GetPendingMessage().ToString();
+		Canvas->SetDrawColor(TextColor.ToFColor(true));
+
+		float W = 0.0f, H = 0.0f;
+		Canvas->StrLen(Font, Message, W, H);
+		Canvas->DrawText(Font, Message, (Canvas->SizeX - W) * 0.5f, Canvas->SizeY * 0.4f, 1.0f, 1.0f);
+
+		const FKey DismissKey = Ball->GetMessageDismissKey();
+		const FString KeyLabel = (DismissKey == EKeys::SpaceBar) ? TEXT("空格") : DismissKey.GetDisplayName().ToString();
+		const FString Hint = FString::Printf(TEXT("按 %s 继续"), *KeyLabel);
+		Canvas->StrLen(Font, Hint, W, H);
+		Canvas->DrawText(Font, Hint, (Canvas->SizeX - W) * 0.5f, Canvas->SizeY * 0.4f + 48.0f, 1.0f, 1.0f);
+		return;
+	}
+
 	TArray<FString> Lines;
 
 	if (bShowGravityStatus)
