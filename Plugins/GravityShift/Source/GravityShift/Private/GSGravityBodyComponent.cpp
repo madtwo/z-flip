@@ -3,9 +3,23 @@
 #include "GameFramework/Actor.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "CollisionQueryParams.h"
+#include "Engine/EngineTypes.h"
+#include "Engine/World.h"
 #include "GSBreakableComponent.h"
 #include "GSGravityManager.h"
 #include "GSSurfaceReceiverComponent.h"
+
+namespace
+{
+	// cm/s: below this the body counts as "settled"; an impact is only reported if the
+	// body had been approaching faster than this right before it settled. Well above the
+	// small jitter a resting GS body shows (~20 cm/s), well below the speeds a designed
+	// breaker drop reaches.
+	constexpr float TickImpactDetectSpeedCm = 100.0f;
+	// Extra reach past the body bounds when tracing for the surface it landed on.
+	constexpr float TickImpactTraceMarginCm = 15.0f;
+}
 
 UGSGravityBodyComponent::UGSGravityBodyComponent()
 {
@@ -168,6 +182,8 @@ void UGSGravityBodyComponent::TickComponent(float DeltaTime, ELevelTick TickType
 	FVector Velocity = TargetPrimitive->GetPhysicsLinearVelocity();
 	CachedPrePhysicsVelocity = Velocity;
 
+	DetectTickImpact(Velocity);
+
 	if (!bGravityEnabled || DeltaTime <= 0.0f)
 	{
 		return;
@@ -264,6 +280,87 @@ FGSImpactReport UGSGravityBodyComponent::EvaluateImpact(AActor* OtherActor, UPri
 	}
 
 	return Report;
+}
+
+void UGSGravityBodyComponent::DetectTickImpact(const FVector& CurrentVelocityCm)
+{
+	if (!bCanBreakTargets)
+	{
+		return;
+	}
+
+	const float SpeedCm = CurrentVelocityCm.Size();
+	if (SpeedCm > TickImpactDetectSpeedCm)
+	{
+		// Still moving fast: remember the peak approach so a later settle can be scored
+		// against the speed it actually arrived with (not the ~0 it reads once blocked).
+		if (SpeedCm > TickImpactApproachSpeedCm)
+		{
+			TickImpactApproachSpeedCm = SpeedCm;
+			TickImpactApproachDirection = CurrentVelocityCm / SpeedCm;
+		}
+		return;
+	}
+
+	// Settled (or never left rest). If we had been approaching faster than the impact
+	// threshold, this stop was a real collision with whatever is now beneath us.
+	const float ApproachSpeedCm = TickImpactApproachSpeedCm;
+	TickImpactApproachSpeedCm = 0.0f;
+	if (ApproachSpeedCm >= TickImpactDetectSpeedCm)
+	{
+		ResolveTickImpact(ApproachSpeedCm);
+	}
+}
+
+void UGSGravityBodyComponent::ResolveTickImpact(float ApproachSpeedCm)
+{
+	AActor* Self = GetOwner();
+	if (!Self || !TargetPrimitive || TickImpactApproachDirection.IsNearlyZero())
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Trace along the direction it was travelling when it stopped; the surface it hit is
+	// within its own bounds of the body centre now that the two are in contact.
+	const FVector Start = TargetPrimitive->GetComponentLocation();
+	const FVector Dir = TickImpactApproachDirection;
+	const float TraceLen = TargetPrimitive->GetBounds().SphereRadius + TickImpactTraceMarginCm;
+	FCollisionQueryParams Params(NAME_None, /*bTraceComplex=*/false, Self);
+	FHitResult Hit;
+	if (!World->LineTraceSingleByChannel(Hit, Start, Start + Dir * TraceLen, ECC_Visibility, Params))
+	{
+		return;
+	}
+
+	AActor* OtherActor = Hit.GetActor();
+	UGSBreakableComponent* Breakable = OtherActor ? OtherActor->FindComponentByClass<UGSBreakableComponent>() : nullptr;
+	if (!Breakable)
+	{
+		return;
+	}
+
+	// Shared per-actor cooldown with the OnComponentHit path.
+	const double Now = World->GetTimeSeconds();
+	if (const double* Last = LastImpactTimeByActor.Find(OtherActor))
+	{
+		if (Now - *Last < RepeatedImpactCooldownSeconds)
+		{
+			return;
+		}
+	}
+	LastImpactTimeByActor.Add(OtherActor, Now);
+
+	const float ApproachSpeedMps = GSGravity::CmToM(ApproachSpeedCm);
+	const float MassKg = FMath::Max(TargetPrimitive->GetMass(), 0.01f);
+	const float EnergyJ = 0.5f * MassKg * ApproachSpeedMps * ApproachSpeedMps * FMath::Max(BaseImpactEnergyMultiplier, 0.0f);
+
+	Breakable->ApplyImpactEnergy(EnergyJ, Self);
 }
 
 void UGSGravityBodyComponent::HandleTargetHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)

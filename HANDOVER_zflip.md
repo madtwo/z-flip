@@ -1,7 +1,8 @@
 # GravityShift v5 — 进度同步 / 交接文档（z-flip 项目）
 
 > 更新时间：2026-09-03 深夜 (GMT+8)
-> 状态：v5 已验收（§8-§10）；v6 六方向已同步本机并编译（§11；+Y 贴墙/G 两墙摆荡已 PIE 抽测通过，§11.9 全用例矩阵仍待实机）；**§12 = 本轮核心交付:导轨相机(防晕)+ 全表面操作映射 + Q/E 玩家调距,PIE 验证通过,待用户完整手感验收**
+> 状态：v5 已验收（§8-§10）；v6 六方向已同步本机并编译（§11；+Y 贴墙/G 两墙摆荡已 PIE 抽测通过，§11.9 全用例矩阵仍待实机）；**§12 = 导轨相机(防晕)+ 全表面操作映射 + Q/E 玩家调距,PIE 验证通过,待用户完整手感验收**
+> **§13 = 2026-09-04 本轮交付：障碍物物理砸碎修复(根因 tick 自检+PIE 15369J)+ 玩家球落地三带网格联动(≤4格安静/5-6格反弹/≥7格反重力,弹回4格)**,均 Live Coding+PIE 验证通过;实机手感 & 前台 7格边界验收待用户
 > 写这份文档的目的：先把做到哪、卡在哪、改了什么、踩了什么雷同步清楚，供人工诊断。
 
 ---
@@ -331,3 +332,80 @@ Manager 由 GameMode BeginPlay 自动 spawn,BeginPlay **可能延迟到下一 ti
 - 新关卡接导轨相机:摆 `GSCameraRail`(本地 Z=轨道方向,朝房间内部看)+ 设 `RailLength`,流程与参数详见 `USAGE_WHITEBOX.md`「相机导轨」节;不摆 = 旧行为,完全向后兼容。
 - 相机手感参数集中在球组件 `GSRailCameraComponent` 与导轨 Actor 两处,不需要动 C++。
 - 别把重力方向接进轨相机滚转(设计如此:滚转锁世界竖直),要改先看 §12.1 设计定案与用户验收结论。
+
+---
+
+## 13. 2026-09-04 第七轮:障碍物物理砸碎修复 + 玩家球落地三带网格联动(Live Coding + PIE 验证通过)
+
+> 本轮两条交付,均只改 C++、Live Coding 热载成功、PIE fire-and-read 验收;关卡零污染(见 §13.6 地图自动保存雷)。工作树 4 个未提交文件 = §13.2 两件(GravityBody)+ §13.5 两件(LandingResponse);会话开始时仓库 clean,故这些 diff 全是本轮产出,未 commit(如需推送另说)。
+
+### 13.1 需求(用户原话要点)
+
+- **障碍物破坏**:让物理砸碎真实触发(此前看似有能量模型但实际不破)。
+- **落地速度检测关联网格系统**:不触发 = 速度 ≤ 从 4 格高度落下;触发反弹 = 5–6 格之间;触发反重力 = ≥ 7 格;**反弹后的高度为 4 格**。
+
+### 13.2 障碍物砸碎修复:velocity 驱动体收不到 OnComponentHit → tick 自主冲击检测
+
+**症状/铁证**:GravityBreaker 真实自由落体砸脆弱块不破;`GetLastImpactReport()` 恒 `bValid=False` → `OnComponentHit→EvaluateImpact` 从未执行;直接调 `apply_impact_energy` 却能破。已排除 GridSnap teleport(Breaker DA snap_to_grid=False)。
+
+**根因**:GS 重力体是 velocity 驱动模型(每帧 `SetPhysicsLinearVelocity`+`AddForce`+`SetEnableGravity(false)`),Chaos 求解器**不为这类体派发 OnComponentHit 通知** → 全部冲击检测走死路径。
+
+**修复(加在 `GSGravityBodyComponent`)**:不依赖引擎通知的 tick 自检——
+- TickComponent 读实际速度(pre-physics,post-step):`>100cm/s` 判运动中,跟踪峰值接近速度+方向;掉到 `≤100cm/s` 判停住 = 撞击(100 远高于 resting jitter ~20,远低于真实下坠)。
+- 沿接近方向 `LineTraceSingleByChannel(ECC_Visibility)` 自身包围盒 + 15cm 找目标 → 有 `UGSBreakableComponent` → 复用 `ApplyImpactEnergy`(共享 `LastImpactTimeByActor` 冷却去重)。
+- 仅 `bCanBreakTargets` 体参与(球/普通块不受影响);OnComponentHit 绑定保留(死路径无害)。
+
+**PIE 验证**:500cm 空投 → 破(`impact 15369.76J … health 0.00`/`BROKEN`;理想 v=√(2·16·5)=12.65m/s≈18000J,实测 11.7m/s 为拖拽损耗,同量级);静置 5s 无假破。
+
+### 13.3 LandingResponse 现状读源(改动前的数据真相)
+
+球 DA `DA_GS_Ball_Default` 落地三值实际是 **150 / 2000 / 250 cm/s** 硬编码(quiet<150 / 反转≥2000 / 弹速250),`AutoReverseMode=LANDING_IMPACT`(只落地判定,半空 mercy 关)。与网格物理值 v4≈1131、v7≈1497 完全不符 → 用户要求把这些阈值从「格数」实时推,真正关联网格。
+
+### 13.4 网格联动落地带设计定案
+
+**公式**:`v(格) = √(2 · g · 格 · cell)`,g = 实时 `GravityManager.GravityAccelerationCm(1600)×GravityBody.GravityScale`,cell = 网格细胞 100cm(与 GSGridSnapComponent/GSBlockProfile 同源)。整格跌落无拖拽(axis drag 0)→ 冲击速度≈距离换算,速度分类即"从 N 格落下"。
+
+| 用户规则 | 落地阈值 | 数值(g=1600, cell=100) |
+|---|---|---|
+| ≤4格 → 无效果 | impact ≤ v(4) | 1131 |
+| 5–6格 → 反弹 | v(4) < impact < v(~6.25) | — |
+| ≥7格 → 反重力 | impact ≥ v(7−0.75)=v(6.25) | **1414**(内收原因见下) |
+| 反弹到 4格 | 弹速 = v(4) | 1131 → 顶点 400cm=4格 |
+
+反弹带内落地一次 → 弹回 4格 → 回落后 impact≈v(4) ≤ 阈值 → 安静收敛(不再无限弹,靠既有 bounce-once-per-cycle + 新 `<=` 双保险)。
+
+**实现位置 `GSLandingResponseComponent`**:
+- 新增 `bGridBasedLanding=true` + `GridCellSizeCm=100` + `QuietLandingMaxCells=4` + `GravityReverseMinCells=7` + `BounceToHeightCells=4`(`GravityShift|Landing|Grid` 分组)。
+- `GetEffectiveLandingModifier()`:无 volume 覆盖时用上述格数实时推导三条 cm 阈值;**volume 落地覆盖(cm,最高优先)语义不变**;`bGridBasedLanding=false` 时退回旧 raw cm 字段(逃生舱)。
+- `HandleLanding` 安静判定 `<`→`<=`(兑现「≤4格无效果」的等号边界)。
+- 新增 helper `GetLandingGravityAccelerationCm()`(manager accel × 体 gravity scale)、`FallImpactSpeedForCells(cells)`。
+- 球体 `DA_GS_Ball_Default` / `GSRollingBallPawn::ApplyBallProfile` **零改动**:profile 仍推进的 150/2000/250 cm 字段在网格模式下被忽略(仅 cm 模式/后备用)。反弹沿用既有切线保持(0.85)语义。
+
+**反重力阈值内收 0.75 格(关键防雷)**:落地组件用的是**接触前一物理帧**采样的 `CurrentFallSpeedCm`,天然偏低 ~g·dt(60fps≈25cm/s;低帧率更狠)。若阈值取精确 v(7)=1497,恰好 7格跌落实测可能落在阈值下 → 误判反弹。内收到 v(6.25)=1414:6格真速 1386 **永不高估→任何帧率都反弹**;7格在前台可玩帧率采样 ≥1472 → 稳反转。语义仍整格:反弹只在 5–6格,≥7格必反转。
+
+### 13.5 PIE 验收(网格三带行为轨迹 fire-and-read)
+
+测法:编辑关卡空旷区摆一块立方平台(顶面 Z 定死),球从 PlayerStart 瞬移到平台正上方 N·100+50 处归零速 → bash sleep 分段采样 `z` + 重力方向。平台顶避开上/下 KillVolume 夹层(全图 z1300~1900 上夹层、z<−150 下夹层,平台顶取 Z=300 使 8格 中心仍低于 1300)。
+
+| N(格) | 期望 | 实测轨迹 |
+|---|---|---|
+| 4 | 安静不弹 | 落至静息 z=350(=顶+50)稳定,不升空 ✅ |
+| 5 | 反弹到 ~4格 | apex≈738 后回落静止 ✅ |
+| 6 | 反弹到 ~4格 | apex≈750-753(静息+400=4格)后回落静止,gravity 恒 −1 不反转 ✅ |
+| 7 | 反重力 | **后台 PIE 只读到 impact≈1356(<1414)→ 反弹**(见 §13.6 节流雷,后台不可分 6/7) |
+| 8 | 反重力 | impact 1673 ≥1414 → gravity 翻 +1、持续上行(460→1093)直至顶部 killvol 重置 ✅ |
+
+推导阈值读值确认:`noResp=1131.4 / autoRev=1414.2 / bounce=1131.4`(与公式一致)。反重力路径经 N=8 实触发确认;4/5/6 三带分界轨迹成立;**7格在真实前台帧率**下采样 ≥1472>1414 必反转(数学余量,本环境仅此一格无法在后台精确复现,交用户实机确认)。
+
+### 13.6 踩坑记录(本轮新增)
+
+1. **后台 PIE 深度节流 → 落地采样系统性偏低**:编辑器非前台时 PrePhysics tick 被压到 ~11fps,`CurrentFallSpeedCm` 最高采到"接触前 ~90ms"的速度 → 系统性低 ~g·dt≈140cm/s(N=7 理想 1497 只读到 1356;N=8 读 1673,差 116 同量级)。`Slate.SleepWhenNotForeground 0` / `t.UseLessCPUWhenInBackground 0` 均救不了后台 PIE。**结论:落地阈值这类"边界值等于物理落速"的验收,必须在真实前台帧率跑或用大落差让采样稳超阈值**;6↔7 格(速度差仅 ~111)在后台 90ms tick 下本就不可分,非代码缺陷。
+2. **编辑器关卡自动保存污染**:PIE 建场期间编辑器把测试平台自动存进了 `Content/测试案例.umap`(git diff +10KB,磁盘含 `PIE_TestPlatform`),即使事后 destroy actor 也只清内存。本会话对关卡无任何有意修改 → `git checkout` 该 umap 回退,残留清除(grep 0)。**教训:编辑器关卡测试后若 .umap 出现莫名 diff,先查测试 actor 残留并回退,别把脏关卡留在工作区。**
+3. `FGSLandingReport` 这类自定 struct 的 enum 字段在 UE Python 读不稳定(偶发 pythonize 崩溃/读成垃圾)——验证改走"轨迹 z+重力方向"行为信号,别依赖 struct 字段读。
+
+### 13.7 给下一个 AI
+
+- 落地三带参数都在 `UGSLandingResponseComponent` 的 `GravityShift|Landing|Grid`(细胞 100 / 4 / 7 / 4),不改 C++ 也能在实例上调;要关网格联动把 `bGridBasedLanding` 勾掉即回 raw cm 模式(组件旧字段 + 球 profile 的 150/2000/250 才重新生效)。
+- 障碍物破坏 = 纯 tick 自检,无需引擎 Hit 事件;想调灵敏度改 `GSGravityBodyComponent` 里匿名命名空间 `TickImpactDetectSpeedCm`(现 100)。相关能量/阈值/标签链见既有 Breakable 体系。
+- 想确认 7格边界:让用户前台跑 PIE 从 7格顶自由落一次(应反转),或任何 ≥30fps 环境按 §13.5 表重测。
+- 详细记忆已存 `.claude/.../memory/`:`physical-break-path-not-firing`(砸碎根因)、`grid-linked-landing-bands`(网格联动 + 节流/autosave 两雷)。

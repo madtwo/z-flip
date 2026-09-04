@@ -84,9 +84,26 @@ void UGSLandingResponseComponent::ClearLandingModifiers()
 FGSLandingModifierSpec UGSLandingResponseComponent::GetEffectiveLandingModifier() const
 {
 	FGSLandingModifierSpec Spec;
-	Spec.NoResponseBelowImpactSpeedCm = NoResponseBelowImpactSpeedCm;
-	Spec.BounceSpeedCm = BounceSpeedCm;
-	Spec.AutoReverseAtSpeedCm = LandingAutoReverseAtSpeedCm;
+	if (bGridBasedLanding && GridCellSizeCm > 0.0f)
+	{
+		// Grid-linked base: derive the three bands from current gravity and cell height so a
+		// fall of N cells always reads as N cells, regardless of gravity/cell tuning.
+		Spec.NoResponseBelowImpactSpeedCm = FallImpactSpeedForCells(QuietLandingMaxCells);
+		// The fall speed is sampled up to one physics tick before contact (up to ~v*dt,
+		// a few percent low at 60 fps, worse if the frame rate drops), so an exact
+		// v(ReverseMinCells) threshold sits inside that frame noise for a fall from exactly
+		// ReverseMinCells. Pulling the reverse edge three-quarters of a cell inward keeps an
+		// exact 7-cell drop decisive at playable frame rates while a 6-cell drop (v6, which
+		// the sampler never overshoots) still bounces.
+		Spec.AutoReverseAtSpeedCm = FallImpactSpeedForCells(FMath::Max(GravityReverseMinCells - 0.75f, 0.0f));
+		Spec.BounceSpeedCm = FallImpactSpeedForCells(BounceToHeightCells);
+	}
+	else
+	{
+		Spec.NoResponseBelowImpactSpeedCm = NoResponseBelowImpactSpeedCm;
+		Spec.BounceSpeedCm = BounceSpeedCm;
+		Spec.AutoReverseAtSpeedCm = LandingAutoReverseAtSpeedCm;
+	}
 	Spec.BounceTangentialRetention = BounceTangentialRetention;
 
 	if (ActiveModifiers.Num() == 0)
@@ -137,6 +154,19 @@ void UGSLandingResponseComponent::ResetFlightState()
 	bReverseConsumedThisFlight = false;
 	bBouncedSinceQuietLanding = false;
 	bWasSupported = true;
+}
+
+float UGSLandingResponseComponent::GetLandingGravityAccelerationCm() const
+{
+	const float Accel = GravityManager ? GravityManager->GravityAccelerationCm : 1600.0f;
+	const float Scale = GravityBody ? GravityBody->GravityScale : 1.0f;
+	return Accel * FMath::Max(Scale, 0.0f);
+}
+
+float UGSLandingResponseComponent::FallImpactSpeedForCells(float Cells) const
+{
+	const float HeightCm = FMath::Max(Cells, 0.0f) * FMath::Max(GridCellSizeCm, 0.01f);
+	return FMath::Sqrt(2.0f * GetLandingGravityAccelerationCm() * HeightCm);
 }
 
 bool UGSLandingResponseComponent::ProbeGround() const
@@ -257,7 +287,7 @@ void UGSLandingResponseComponent::HandleLanding(float ImpactSpeedCm)
 		return;
 	}
 
-	if (ImpactSpeedCm < Mod.NoResponseBelowImpactSpeedCm)
+	if (ImpactSpeedCm <= Mod.NoResponseBelowImpactSpeedCm)
 	{
 		Report.Action = EGSLandingResponseAction::NONE;
 		// A quiet landing resets the one-bounce cycle: the next bounce-band

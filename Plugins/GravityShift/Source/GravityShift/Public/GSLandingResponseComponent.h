@@ -41,6 +41,28 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	bool bPreserveTangentialVelocityOnBounce = true;
 
+	// ---- Grid-linked landing response ----
+	// When enabled, the three landing bands below are derived from the world's block
+	// grid cell height and the current gravity (v(cells) = sqrt(2*g*cells*cell)),
+	// instead of the raw cm/s fields further down: a landing at impact <= v(4 cells)
+	// is ignored, v(7 cells) and above reverses gravity, and in between the ball
+	// bounces back up to a v(4 cells) launch speed. A landing modifier applied by a
+	// volume still overrides all of this with its explicit cm/s values.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Landing|Grid")
+	bool bGridBasedLanding = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Landing|Grid", meta = (ClampMin = "0.01"))
+	float GridCellSizeCm = 100.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Landing|Grid", meta = (ClampMin = "0.0"))
+	float QuietLandingMaxCells = 4.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Landing|Grid", meta = (ClampMin = "0.0"))
+	float GravityReverseMinCells = 7.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Landing|Grid", meta = (ClampMin = "0.0"))
+	float BounceToHeightCells = 4.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift", meta = (ClampMin = "0.0"))
 	float NoResponseBelowImpactSpeedCm = 150.0f;
 
@@ -146,6 +168,9 @@ protected:
 
 	UPROPERTY()
 	TMap<TObjectPtr<AActor>, FGSLandingModifierSpec> ActiveModifiers;
+
+	float GetLandingGravityAccelerationCm() const;
+	float FallImpactSpeedForCells(float Cells) const;
 
 	bool ProbeGround() const;
 	void HandleLanding(float ImpactSpeedCm);

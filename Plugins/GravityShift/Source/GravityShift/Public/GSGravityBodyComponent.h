@@ -99,11 +99,21 @@ protected:
 	FVector CachedPrePhysicsVelocity = FVector::ZeroVector;
 	FGSImpactReport LastImpactReport;
 
+	// Velocity-driven bodies under the custom gravity model do not reliably receive
+	// OnComponentHit notifies from the solver, so impacts are self-detected instead:
+	// while the body is moving fast we track its peak approach speed and direction;
+	// when it then settles to ~rest that frame is an impact against whatever it landed on.
+	float TickImpactApproachSpeedCm = 0.0f;
+	FVector TickImpactApproachDirection = FVector::ZeroVector;
+
 	UPROPERTY()
 	TMap<TObjectPtr<AActor>, double> LastImpactTimeByActor;
 
 	UFUNCTION()
 	void HandleTargetHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
+
+	void DetectTickImpact(const FVector& CurrentVelocityCm);
+	void ResolveTickImpact(float ApproachSpeedCm);
 
 	UFUNCTION()
 	void HandleGravityChanged(EGSGravityPolarity NewPolarity, FVector GravityDirection, int32 Revision, EGSGravityChangeReason Reason);
