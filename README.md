@@ -67,9 +67,10 @@
 
 ## 文档地图
 
-- `USAGE_WHITEBOX.md` — 白盒装配指南(类清单/配置/标签约定/python 批量摆法)
+- `USAGE_WHITEBOX.md` — 白盒装配指南(文件存放规范/类清单/配置/标签约定/python 批量摆法)
+- `AgentSkill/gs-block-assembly/SKILL.md` — **关卡侧 AI 专用积木拼装 skill**(拿白盒地图→拼成可玩关卡,配方实测)
 - `AGENT_GUIDE.md` — AI 接手指南(环境/连接/编译/排雷入口)
-- `HANDOVER_zflip.md` — 完整交接史(五轮工作、每轮踩坑与修复)
+- `HANDOVER_zflip.md` — 完整交接史(每轮工作、踩坑与修复)
 - `AgentSkill/ue-nocode/` — UE 无代码操控工作手册(AI skill,含按症状查询的主题手册)
 - `AgentSkill/ue-cpp-build-cnpath/` — 中文路径 C++ 编译排雷
 

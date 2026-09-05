@@ -77,3 +77,12 @@ pawn  = unreal.GameplayStatics.get_player_pawn(w, 0)
 - 编辑器层摆测试 actor + PIE 时,autosave 会把脏关卡**写穿到真 umap 文件**(哪怕事后 destroy actor,磁盘 diff 已发生)。
 - **标准处置**:PIE 测试跑完第一件事 `git status` 查 umap → 脏了就 `git checkout -- <umap>` 回退;测试 actor 在编辑器世界 destroy 后重载 `EditorLoadingAndSavingUtils.load_map` 清脏标记更稳。
 - `EditorLoadingAndSavingUtils` 没有 `set_dirty_package`;治本:能不开编辑器世界摆场的验收,改在 PIE 世界里临时 spawn。
+- **checkout 撞 "unable to unlink ... Invalid argument"**:编辑器正加载着该 umap,句柄占用。三步回退:`load_map('/Engine/Maps/Templates/Template_Default')` 切走 → `git checkout -- <umap>` → `load_map('/Game/原关卡')` 切回(2026-09-05 实测)
+
+## 交接手册可行性验收法:模拟对方处境(2026-09-05,手册"积木拼装"就靠这个落地)
+
+- 写"照做就能行"的文档,验收标准不是"文档写完了",而是**自己当一次fresh 用户**:新建空关卡 `unreal.EditorLevelLibrary.new_level('/Game/Maps/临时名')`(返回 False 但实际建好切过去了,别被吓到),只按手册摆件 → PIE → 逐条断言 → 清理(删临时 umap + 切回原图 + checkout 被碰脏的 umap)
+- 新关卡上断言"零配置可玩":玩家 pawn 类名(GSRollingBallPawn=GameMode 全局生效)、Manager 数=1、重力方向、球落稳 z
+- 编辑器世界摆 StaticMeshActor:`EditorActorSubsystem` **只有 `spawn_actor_from_class`**(没有 spawn_actor);网格用 `static_mesh_component.set_static_mesh(load_asset(...))`
+- 这套跑一遍,写进手册的每一步都有实测背书,对方 AI 照抄不会掉坑
+

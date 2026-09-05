@@ -7,8 +7,9 @@
 1. 本文件(环境与连接)
 2. `HANDOVER_zflip.md` — 完整交接史:每轮做了什么、踩了什么雷、修了什么,**别重复踩**
 3. `AgentSkill/ue-nocode/SKILL.md` — 工作手册入口(按"症状→手册"目录表查 `AgentSkill/ue-nocode/reference/`)
-4. 改 C++ 前必读 `AgentSkill/ue-cpp-build-cnpath/SKILL.md`(中文路径编译排雷)
-5. 玩法/装配问题查 `USAGE_WHITEBOX.md` 和 `README.md`
+4. **你的任务是往白盒关卡里拼玩法(不写 C++)→ 直接用 `AgentSkill/gs-block-assembly/SKILL.md`(关卡积木拼装专用,配方已实测)**
+5. 改 C++ 前必读 `AgentSkill/ue-cpp-build-cnpath/SKILL.md`(中文路径编译排雷)
+6. 玩法/装配问题查 `USAGE_WHITEBOX.md` 和 `README.md`
 
 ## 1. 环境事实(本机,若换机器按此核对)
 
