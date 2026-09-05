@@ -71,3 +71,9 @@ pawn  = unreal.GameplayStatics.get_player_pawn(w, 0)
 - **v2 六向 G/R 修复**(2026-09-01):BindKey 对关卡实例失效 → 改 Tick 轮询,重编译 14s,OS 注入验收 G=横移 2156cm、R=RESET 归位 ✅
 - **v5 滚球翻转验收**(2026-09-02):toggle ACCEPTED→球升空(广播唤醒)→摄像机 slerp→撞棚顶 FALL_THRESHOLD 自动反向→reset 语义 NO_CHANGE 正确 ✅。遗留:用户实机 WASD/G/E/R 游玩验收
 - **金币案例**(PIE 实测 ✅):传送玩家观察吸附/销毁的验收法即出自此,详见 BLUEPRINT_EDITOR.md
+
+## 坑 5:编辑器 autosave 把测试场景写进用户关卡 umap(三度复发:§13.6/§14.6/§15.2)
+
+- 编辑器层摆测试 actor + PIE 时,autosave 会把脏关卡**写穿到真 umap 文件**(哪怕事后 destroy actor,磁盘 diff 已发生)。
+- **标准处置**:PIE 测试跑完第一件事 `git status` 查 umap → 脏了就 `git checkout -- <umap>` 回退;测试 actor 在编辑器世界 destroy 后重载 `EditorLoadingAndSavingUtils.load_map` 清脏标记更稳。
+- `EditorLoadingAndSavingUtils` 没有 `set_dirty_package`;治本:能不开编辑器世界摆场的验收,改在 PIE 世界里临时 spawn。

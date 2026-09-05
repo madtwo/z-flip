@@ -1,9 +1,10 @@
 # GravityShift v5 — 进度同步 / 交接文档（z-flip 项目）
 
-> 更新时间：2026-09-04 (GMT+8)
+> 更新时间：2026-09-05 (GMT+8)
 > 状态：v5 已验收（§8-§10）；v6 六方向已同步本机并编译（§11；+Y 贴墙/G 两墙摆荡已 PIE 抽测通过，§11.9 全用例矩阵仍待实机）；**§12 = 导轨相机(防晕)+ 全表面操作映射 + Q/E 玩家调距,PIE 验证通过,待用户完整手感验收**
 > **§13 = 2026-09-04 第七轮交付：障碍物物理砸碎修复(根因 tick 自检+PIE 15369J)+ 玩家球落地三带网格联动(≤4格安静/5-6格反弹/≥7格反重力,弹回4格)**,均 Live Coding+PIE 验证通过;实机手感 & 前台 7格边界验收待用户
 > **§14 = 2026-09-04 第八轮交付：拾取物品 + 拾取钥匙开门(F 交互/拾取锁屏消息空格继续/门按 RequiredKeyID 配对/滑开动画/死亡重置回锁复位)**,UBT 编译通过 + PIE 全用例验收(18/18 断言 + 滑门开/关时序);详见 §14,剩一处已知滑门落座偏差见 §14.6
+> **§15 = 2026-09-05 第九轮交付：§13/§14 拉取同步本机+重编 + 「积木式」对接文档(README 功能积木清单 / USAGE_WHITEBOX 文件存放规范+拾取钥匙门手册),手册摆法已实机 PIE 走通**;关卡策划对接入口 = README「功能积木清单」→ USAGE_WHITEBOX
 > 写这份文档的目的：先把做到哪、卡在哪、改了什么、踩了什么雷同步清楚，供人工诊断。
 
 ---
@@ -485,3 +486,44 @@ Manager 由 GameMode BeginPlay 自动 spawn,BeginPlay **可能延迟到下一 ti
 - 中央锁屏提示可选:拾取物 `PickupMessage` 留空 = 静默收集不锁屏;钥匙 ctor 自带默认文案。锁屏键在球 Pawn 的 `DismissMessageKey`(默认 Space),HUD 提示文案在 `GSFramework.cpp`。
 - 想确认滑门修正:等用户决定后按 §14.6-1 一行改,重启编辑器重编,PIE 摆一扇门捡钥匙看 rel z 350 / 重置后回 110。
 - 工作树 6 文件 = §14.3 全部本轮产出,未 commit(如需推送另说)。
+
+---
+
+## 15. 2026-09-05 第九轮:积木式对接文档(同步 §13/§14 + 白盒手册实测)
+
+> 本轮是**文档轮**,同时把 §13/§14 的代码(提交 294a806 + 6248bcb,12 文件,含 umap)拉回本机、UBT 重编(dll 13:05 > 源码 13:03,本地 commit cb064ee),并按队友要求把"怎么把 GS 积木拼进关卡"写成正式手册——**手册里写的每一步都先在编辑器实机走通过再落笔**,不是纸上谈兵。
+
+### 15.1 队友诉求与本轮回应
+
+诉求(转述):简要说明蓝图等文件存放规范;更新 README / USAGE_WHITEBOX;最好有一份**现有功能积木的简要汇总 + 具体调用方式**,让关卡策划做白盒时能像拼积木一样把系统拼进 UE。
+
+回应(三处,全部已提交):
+1. **README「功能积木清单」**:一张表列全 10 类可摆积木(Pickup/Key/KeyDoor/GravitySwitch/SurfaceVolume/LandingVolume/BlockBase+DA/KillVolume/Checkpoint|Collectible|FinishGoal/CameraRail),每块写"干什么 + 怎么配对/触发";另附一行"自动挂球身上不用摆的组件"(GravityBody / LandingResponse 落地三带 / RailCamera)与砸碎链说明。**这就是关卡策划的对接入口。**
+2. **USAGE_WHITEBOX 新增「文件与命名规范」**:Content 分域表(GravityShift/Core|Blocks|Interactions|World|Data/Profiles|Tests vs LevelPrototyping 白盒库 vs Content 根放 umap,新关卡建议 Content/Maps/)+ 命名前缀约定(BP_/DA_/SM_/M_/MI_/T_)+ "GS 类全在 C++,BP 只是壳,能直接摆 C++ 类就不必先建 BP"。
+3. **USAGE_WHITEBOX 新增「拾取物/钥匙/门」整节**(见 15.2)与「落地三带与重力砸碎」整节(策划视角,含"别拆破坏者的 GSGravityBody"警告)。
+
+### 15.2 手册可行性实机验证(PIE,编辑器摆件→三段式读态)
+
+按手册"最小配对流程"原样执行:编辑器世界 spawn `GSPickupItem`(带文案)+ `GSKey`(KeyID=red)+ `GSDoor`(RequiredKeyID=red)→ PIE:
+
+| 步骤 | 断言 | 结果 |
+|---|---|---|
+| 传送球到拾取物旁 `TryInteract()` | `is_collected=True` / `is_message_locked=True` / 中央文案=自定义句 | ✅ |
+| `DismissPendingMessage()`(=按空格) | `is_message_locked=False` | ✅ |
+| 传送球到钥匙旁 `TryInteract()` | 钥匙 `is_collected=True` **且** 门 `is_locked=False`(捡钥匙瞬间全图广播解锁) | ✅ |
+| 放行 ~6s 读门板 | DoorMesh 相对位置 z=**240**(=SlideOffset,滑动动画完成) | ✅ |
+| `ResetWorld()` | 门回锁 `True`、拾取物/钥匙 `is_collected=False`、锁屏解除 | ✅ |
+
+测后清理:TEST_ 三件已销毁;umap 被 autosave 写脏一次(§13.6 雷 3 三度复发),已 `git checkout` 回退,工作树干净——**教训同前,PIE 摆场后必查 umap**。
+
+### 15.3 本轮新坑(反哺 skill)
+
+1. **Python 类名没有 A 前缀**:`unreal.GSKey`/`GSPickupItem`/`GSDoor`(不是 AGSKey…);`hasattr(unreal,'AGSKey')` 恒 False。C++ 的 A/U 前缀在 Python 绑定里剥掉。
+2. **BlueprintPure 函数 ≠ 属性**:`IsMessageLocked()` 要 `ball.is_message_locked()` 方法调用,`get_editor_property('is_message_locked')` 直接异常。
+3. `EditorLoadingAndSavingUtils` **没有** `set_dirty_package`;清关卡脏标记用 `load_map` 重载(本轮 PIE 结束后脏列表已空,未走到)。
+
+### 15.4 给下一个 AI
+
+- 关卡策划/新关卡对接:**README「功能积木清单」→ USAGE_WHITEBOX 对应节**,别再口头转述;拾取/钥匙/门测试图里没有预摆,要试照 §15.2 流程 5 分钟搭一套。
+- §14.7 末"工作树 6 文件未 commit"已过时:§13/§14 全部产出已随 cb064ee 收进仓库,远端见本轮推送。
+- §14.6-1 滑门落座偏差仍**未修**(用户拍板暂不修),别当回归。

@@ -57,3 +57,8 @@
 ## 存盘
 
 - `EditorAssetLibrary.save_asset` 对某些改动返回 False(假拒,值其实只在内存)→ 改用**静态工具类** `unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)`(注意它是工具类**不是 Subsystem**,`get_editor_subsystem` 会报 "must be a Class");存完用磁盘 mtime 确认真的落盘
+
+## 类名与函数调用(2026-09-05 实踩)
+
+- **Python 类名没有 A/U 前缀**:`AGSKey`/`AGSPickupItem`/`AGSDoor` 在 unreal 模块里是 `unreal.GSKey`/`unreal.GSPickupItem`/`unreal.GSDoor`;`hasattr(unreal,'AGSKey')` 恒 False、`getattr` 返回 None,别误判成"类没编译进去"。断言新类用去前缀名
+- **BlueprintPure 函数 ≠ 属性**:`IsMessageLocked()` 这类 BlueprintPure 要方法调用 `ball.is_message_locked()`,`get_editor_property('is_message_locked')` 抛 "Failed to find property"。判据:UFUNCTION 标 BlueprintPure 的用括号,UPROPERTY 的用 get/set_editor_property
