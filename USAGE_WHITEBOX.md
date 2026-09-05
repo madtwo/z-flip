@@ -36,6 +36,7 @@ Content 目录按功能分域,**游戏积木资产(C++ 类的 BP 壳/DA)只进 `
 | 滚球玩家 | GameMode DefaultPawn,在 **PlayerStart** 生成 → 关卡里必须有一个 PlayerStart |
 
 ⚠ 手动再摆一个 Manager 会出现双 Manager(日志警告,良性但别这么干)。
+ℹ 例外——想给**本关**改默认重力方向或限制可用轴(如只许 Z、或开局就在墙上):摆**恰好一个** `GS World State Manager`(代码会识别已摆放的、不再自动生成),细节面板 `Gravity|LevelConfig` 里配 `DefaultGravityDirection` / `AllowedGravityAxes`。什么都不配 = 默认 −Z 落地 + 全轴可用,普通关卡不用管。
 
 ## 需要摆的(Place Actors 搜 "GS",或用 /Game/GravityShift 下的 BP 壳)
 
