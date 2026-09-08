@@ -57,6 +57,10 @@ AGSRollingBallPawn::AGSRollingBallPawn()
 	// UpdateCamera writes an absolute world rotation every tick; treat it as
 	// absolute so the rolling ball's rotation never bleeds into the camera rig.
 	CameraPivot->SetUsingAbsoluteRotation(true);
+	// Location: BeginPlay applies bUseAbsoluteCameraLocation. Default ON - a
+	// relative pivot inherits the physics ball's per-frame displacement between
+	// pawn ticks, which bypasses the rail camera's exponential smoothing entirely
+	// and shows up as small instant jitter while moving.
 
 	CameraArm = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraArm"));
 	CameraArm->SetupAttachment(CameraPivot);
@@ -87,6 +91,13 @@ void AGSRollingBallPawn::BeginPlay()
 	Super::BeginPlay();
 
 	RefreshSystemReferences();
+
+	if (CameraPivot)
+	{
+		// Apply the instance-settable absolute-location switch here so PIE tests
+		// can flip it for A/B jitter comparisons.
+		CameraPivot->SetUsingAbsoluteLocation(bUseAbsoluteCameraLocation);
+	}
 
 	if (BallProfile)
 	{
@@ -256,6 +267,19 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 			bRailCamActive = true;
 			CameraArm->bDoCollisionTest = false;
 			CameraArm->TargetArmLength = 0.0f;
+		}
+		if (bRailCamDebugLog && CameraPivot)
+		{
+			// pivotPrev = where last tick's write has drifted to by now: with a
+			// relative-located pivot this includes the ball's intra-frame motion
+			// (the unsmoothed leak); with absolute location it stays at the write.
+			const FVector PrevPivot = CameraPivot->GetComponentLocation();
+			const FVector BallLoc = BallCollision ? BallCollision->GetComponentLocation() : GetActorLocation();
+			UE_LOG(LogTemp, Log, TEXT("[RailCam] t=%06.2f dt=%.4f pivotPrev=(%.1f,%.1f,%.1f) ball=(%.1f,%.1f,%.1f) railTarget=(%.1f,%.1f,%.1f)"),
+				GetWorld()->GetTimeSeconds(), DeltaSeconds,
+				PrevPivot.X, PrevPivot.Y, PrevPivot.Z,
+				BallLoc.X, BallLoc.Y, BallLoc.Z,
+				RailPosition.X, RailPosition.Y, RailPosition.Z);
 		}
 		CameraPivot->SetWorldLocationAndRotation(RailPosition, RailRotation);
 		CurrentCameraUp = RailRotation.RotateVector(FVector::UpVector);

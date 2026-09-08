@@ -555,3 +555,44 @@ Manager 由 GameMode BeginPlay 自动 spawn,BeginPlay **可能延迟到下一 ti
 
 - 同步轮 diff 里凡出现 `Source/` 或新插件目录:**拉完必重编**,并验证 `Plugins/<新插件>/Binaries/Win64/*.dll` 生成(新模块不会走 GravityShift 的 dll 时间戳检查,要单独看)
 - 队友报"看不到东西"排查链:①本地有没有 pull ②pull 的 diff 里有没有 C++ → 重编了没 ③地图非 WP 就查 Actor 数(空图≠坏图,Blockout 本来就是起点图)
+
+### 16.4 用户验收拍板:Blockout 保持空底座,底座补全已回退(同日)
+
+- 用户按 Play 曾反馈"只有个球"(出生点 (0,0,252) 周围无地板,球坠虚空)。AI 曾补过一版基础底座(白盒地板+KillVolume+3 个 Blockout 演示件)并 PIE 验证可玩
+- **用户随后拍板:这张图就该是空盒子,不用改——底座补全已全部回退**,`Content/Maps/Blockout.umap` 恢复李昱辰原版(灯光组+PlayerStart+1 笔刷)
+- 结论给后人:Blockout 起点图**按原样用**;谁要在里面按 Play 试球,先自己摆地板(PlayerStart 在 z=252,球会坠,直到李昱辰正式搭出白盒);摆法照 `AgentSkill/gs-block-assembly/SKILL.md` §2 最小可玩关卡
+
+---
+
+## 17. 2026-09-08 第十一轮:相机移动抖动修复(枢轴绝对定位,PIE 逐帧数据验证)
+
+> 队友报告:**移动时相机"卡卡的",还会瞬间小幅抖动**;样例图(导轨相机)和 Blockout(旧跟随相机)都有——两套相机共用同一个枢轴,症状一致,判断为共性问题而非某一张图的问题。
+
+### 17.1 根因:相机枢轴挂在物理球下,位置却走相对模式
+
+- 组件链:`Camera(UCameraComponent) → CameraArm(USpringArm) → CameraPivot(UScene) → BallCollision(球的物理根,每帧翻滚+位移)`
+- 旧代码只对枢轴做了 `SetUsingAbsoluteRotation(true)`(**旋转**绝对),**位置仍是相对父级**
+- 后果链:每帧 pawn Tick 把平滑后的相机位姿 `SetWorldLocationAndRotation` 写到枢轴 → 本帧稍后的物理步里球根组件移动 → 枢轴作为子组件**继承球当帧的位移** → 这段位移**完全绕过导轨相机的指数平滑层**,直接进入画面
+- 表现:匀速滚动 = "卡卡的"(相机被球逐帧拖拽);加速/急刹/碰撞 = "瞬间小幅度抖动"(那几帧球位移突然变大)。样例图与 Blockout 同时中招的原因即"共用枢轴"
+
+### 17.2 修复(2 个源码文件,零关卡改动)
+
+`GSRollingBallPawn.h/.cpp`:
+1. 新增 `bUseAbsoluteCameraLocation = true`(`GravityShift|Camera` 分组):BeginPlay 里 `CameraPivot->SetUsingAbsoluteLocation(true)`——枢轴位置改成**纯世界定位**,写多少就是多少,不再被物理球带跑;所有平滑由此完整生效。这是修复本体,默认开
+2. 新增 `bRailCamDebugLog`(`GravityShift|Debug`):逐帧打印 `[RailCam] t/dt/pivotPrev/ball/railTarget` 到 `Saved/Logs/z-flip.log`,排查相机问题专用,pivotPrev = 上帧写入值在本帧被漂移到哪(直接读出泄漏量)
+
+### 17.3 验证数据(PIE 脚本驱动球前进,逐帧日志)
+
+| 状态 | 枢轴帧间漂移(= 绕过平滑进画面的量) |
+|---|---|
+| 旧行为(相对定位) | = 球当帧物理位移,未平滑直接进画面(即队友看到的抖) |
+| **修复后(绝对定位)** | **0.00 cm**(39 帧逐帧实测,每帧都精确停在上帧写入点) |
+
+球每帧位移实测 0.4–1.9cm(低速)——旧行为下这就是每帧直入画面的抖动量,急刹/撞击帧更大,与"瞬间小幅"描述吻合。
+
+### 17.4 给队友/下一个 AI
+
+- **pull 后必须重编译**(AGENT_GUIDE §3 SOP;只有 2 个 .h/.cpp,无新模块,正常编一次即可)
+- 想 A/B 复现旧行为:球 Pawn 细节面板把 `use_absolute_camera_location` 关掉再玩(同样的抖动会回来);不用改代码
+- 以后报相机抖动:开 `rail_cam_debug_log` 跑一圈,看 `Saved/Logs/z-flip.log` 里 `[RailCam]` 行,`pivotPrev` 与上帧 `railTarget` 的差就是泄漏量(正常应恒 0)
+- 本轮**没有动任何关卡/umap**,Blockout 仍保持李昱辰原样;只动了 `GSRollingBallPawn.h/.cpp` 两个文件

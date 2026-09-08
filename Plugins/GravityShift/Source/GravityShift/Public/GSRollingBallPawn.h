@@ -97,6 +97,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
 	FKey FlipGravityKey = EKeys::G;
 
+	// CameraPivot location is written in world space and does NOT inherit the
+	// physics ball's intra-frame displacement (that bypasses all camera smoothing
+	// and shows as small instant jitter). Turn off only to A/B the old behaviour.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera")
+	bool bUseAbsoluteCameraLocation = true;
+
+	// Per-frame rail-camera debug log (pivot pre-write position / ball / target).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Debug")
+	bool bRailCamDebugLog = false;
+
 	// Interact moved from E to F: E is now the camera-distance key (Q/E).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
 	FKey InteractKey = EKeys::F;

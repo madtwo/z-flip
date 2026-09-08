@@ -53,12 +53,13 @@ ZFlipEditor Win64 Development "-project=D:/UE/z-flip/z-flip.uproject" -WaitMutex
 4. **睡眠刚体/翻转类评审清单**:力矩轴 `Up×Desired`(写反=操作镜像)、弹簧臂 `bInheritPitch` 必须真、反重力线必须大于房间内最大落体冲击
 5. 中文路径/中文字面量进 bash 会被编码层搅乱——文件操作走 python,PS 脚本写 UTF-8-BOM 文件再执行
 
-## 6. 当前状态速记(2026-09-07)
+## 6. 当前状态速记(2026-09-08)
 
 - v7:六方向重力+导轨相机+落地三带网格联动(≤4安静/5-6反弹/≥7反重力)+拾取/钥匙/门 F 交互链,全部 PIE 实测(§8-§15)
+- **相机移动抖动已修(§17)**:枢轴绝对定位;复现旧抖 = A/B 关球 Pawn 的 `use_absolute_camera_location`;排查用 `rail_cam_debug_log` 逐帧日志
 - 白盒:Blockout Tools 插件已入库(v1.52,含 C++,改完必重编),起点图 `Content/Maps/Blockout.umap`;关卡侧 AI 积木拼装手册 `AgentSkill/gs-block-assembly/SKILL.md`
 - 已知未修:滑门落座偏差(§14.6-1,用户拍板暂不修);7格反转边界待用户前台实机确认(§13.5)
-- 完整验收证据与每轮修复:`HANDOVER_zflip.md` §8-§16
+- 完整验收证据与每轮修复:`HANDOVER_zflip.md` §8-§17
 
 ## 7. GitHub 同步(需要推代码时)
 
