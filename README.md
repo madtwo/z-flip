@@ -22,6 +22,17 @@
 2. 按 Play:球在棚子里,直接 WASD/G 玩
 3. 测试场景已配好:重力/破坏/静态三种方块、重力开关、慢速表面区、上下边界 KillVolume(重置用)、相机导轨
 4. 拾取物/钥匙/门等交互积木不在测试图里预摆——照下面「功能积木清单」+ USAGE_WHITEBOX 自己拼,2 分钟的事
+5. `Content/Maps/Blockout.umap` = **白盒搭建起点图**(灯光组 + PlayerStart + BSP 笔刷示例),配仓库自带的 Blockout Tools 插件(`Plugins/Blockoute60d8e1bd542V15`)画白盒,详见 Place Actors 搜 "Blockout"
+
+### ⚠ 拉取队友更新后"看不到东西"?先重编译!
+
+新增内容里**带 C++**(diff 里有 `Source/` 目录或新插件)时,`git pull` 之后必须重新编译再打开,否则插件加载不了——依赖插件的地图打开就是空的/弹缺插件框:
+
+1. 关掉开着的编辑器
+2. 右键 `z-flip.uproject` → **Switch Unreal Version…** 选当前引擎(触发重编译);或直接双击打开,在弹窗选「重编译 Rebuild」
+3. 编译完成后再开编辑器
+
+(本项目从第一天起就是源码分发,GravityShift 插件同样需要这一步;2026-09-07 Blockout Tools 插件入库同理)
 
 ## 功能积木清单(关卡策划视角)
 

@@ -78,10 +78,15 @@ description: z-flip / GravityShift 关卡积木拼装手册（给关卡侧 AI）
 
 ## 6. 雷区（前人真踩，别重复）
 
+0. **同步队友更新后"看不到东西" = 没重编译**：diff 里出现 `Source/` 目录或新插件（如 Blockout Tools）时，`git pull` 后必须关编辑器重编译（右键 uproject → Switch Unreal Version，或打开时弹窗选 Rebuild）。不重编 → 插件加载不了，依赖插件的地图/内容打开就是空的。新模块编没编过：看 `Plugins/<插件>/Binaries/Win64/` 下有没有生成 dll
 1. **白盒网格没碰撞** → 球穿地。白盒一律检查 Collision Presets
 2. **autosave 污染关卡**：编辑器开着测试时会把脏关卡写穿到 umap 文件。测试完 `git status` 查 umap，脏了就 `git checkout -- <umap>` 回退；文件被编辑器占用回退失败时：先在编辑器切到别的图（如 `/Engine/Maps/Templates/Template_Default`）→ checkout → 再切回
 3. **umap 是二进制**：多人同时改同一张图必然冲突。约定同一时间一张图只有一个人改
 4. 你的 AI 若用远程 Python 摆积木：类名**没有 A/U 前缀**（`unreal.GSKey` 不是 `AGSKey`）；bool 属性去掉 b 前缀（`bIsLocked` → `is_locked`）；BlueprintPure 函数用方法调用（`ball.is_message_locked()`）不是属性
+
+## 7. 白盒工具：Blockout Tools（已在仓库）
+
+画白盒用仓库自带的 **Blockout Tools 插件**（`Plugins/Blockoute60d8e1bd542V15/`，拉取后需重编译一次）：Place Actors 搜 `Blockout` 有 Box/Ramp/Stairs/Cylinder/Doorway 等积木件，比摆普通静态网格快。起点图 `Content/Maps/Blockout.umap`（灯光组+PlayerStart+BSP 笔刷示例，看着"很空"是正常的——它就是给你开始搭的底座）；GS 玩法积木照本手册第 3 节往里拼即可，PlayerStart 已就位。
 
 ## 7. 远程 Python 摆积木速查（可选，已实测）
 

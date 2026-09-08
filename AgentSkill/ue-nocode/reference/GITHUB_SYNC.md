@@ -45,6 +45,8 @@ python pull_apply_remote.py madtwo/z-flip since_sha "D:/UE/z-flip"   # 备份+�
 - `files[].patch` 对小文件自带完整 unified diff,**读"队友改了什么"直接读 patch,不用二次下载**;新增文件 patch=全文
 - 落盘后必做两件核对:①grep 关键新符号确认内容真换了(别只看时间戳);②对比 `Binaries/*.dll` 与源码时间戳——**dll 落后源码=必须关编辑器重编才生效**(编辑器开着 dll 被锁,编不了)
 - 队友只推了源码时,新 .cpp/.h 无需改 Build.cs(UBT 自动收模块目录),但 dll 过期就跑不了新逻辑
+- **diff 里有新插件/新 Source 模块(2026-09-07 Blockout Tools 实例)= 拉完必关编辑器重编**,并验证**新插件自己**的 `Plugins/<插件>/Binaries/Win64/*.dll` 生成(它不是 GravityShift,旧的"对比 GravityShift dll 时间戳"查不到新模块)。跳过重编 = 队友侧"看不到东西":插件加载不了,依赖插件的地图打开是空的
+- 地图"空≠坏":先看图本身是不是起点图(如 Blockout 只有灯光组+PlayerStart+BSP 笔刷),再查 Actor 数,别把正常空图当同步失败
 
 ## 流程坑(真踩)
 

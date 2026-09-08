@@ -527,3 +527,31 @@ Manager 由 GameMode BeginPlay 自动 spawn,BeginPlay **可能延迟到下一 ti
 - 关卡策划/新关卡对接:**README「功能积木清单」→ USAGE_WHITEBOX 对应节**,别再口头转述;拾取/钥匙/门测试图里没有预摆,要试照 §15.2 流程 5 分钟搭一套。
 - §14.7 末"工作树 6 文件未 commit"已过时:§13/§14 全部产出已随 cb064ee 收进仓库,远端见本轮推送。
 - §14.6-1 滑门落座偏差仍**未修**(用户拍板暂不修),别当回归。
+
+---
+
+## 16. 2026-09-07 第十轮:同步「白盒搭建基础」(Blockout 地图+插件入库) + 队友"看不到东西"诊断
+
+> 队友李昱辰 push 提交 48a7eb6「白盒搭建基础」(101 文件):`Content/Maps/Blockout.umap` + 完整 Blockout Tools 插件 v1.52(`Plugins/Blockoute60d8e1bd542V15/`,含 Runtime+Editor 两个 C++ 模块与全部 Content)+ `z-flip.uproject` 启用插件。本机已拉取备份(`_sync_backup/48a7eb6/`)、UBT 重编通过(BlockoutToolsPlugin/EditorPlugin 两个 dll 生成)、编辑器验证通过。
+
+### 16.1 验证结果(本机)
+
+- 插件:uproject 已启用 `BlockoutToolsPlugin`;引擎 Marketplace 无同名冲突;`/BlockoutToolsPlugin/Blueprints/Blockout_Box` 蓝图类可正常加载 → 插件功能可用
+- 地图:`/Game/Maps/Blockout` 打开正常,**14 个 Actor** = 灯光组(方向光/天空光/SkyAtmosphere/体积云/天球)+ PlayerStart + 1 个 BSP 笔刷(约在 (0,2640,90),与测试案例同区)——它是**白盒搭建起点图**,不是摆满的成品关卡
+- 非 World Partition(仓库无 `__ExternalActors__` 路径),单 umap 自包含,无"外部 Actor 没提交导致打开空"风险
+- PlayerStart 在 → Blockout 图按 Play 球照常生成(GameMode 全局),GS 系统可直接在里面玩
+
+### 16.2 队友"看不到东西"诊断与解法(已写进 README「拉取队友更新后看不到东西?」)
+
+根因:这次新增**带 C++ 的插件**,只 `git pull` 不重编译 → 插件加载不了/被禁用,依赖插件的内容打不开或地图看着是空的。解法(已写进 README 快速开始下方,可直接转给队友):
+
+1. 关掉开着的编辑器
+2. 右键 `z-flip.uproject` → Switch Unreal Version… 选当前引擎(触发重编译);或双击打开在弹窗选「重编译」
+3. 编完再开
+
+次要澄清:Blockout 图本身就是"起点"(灯光+PlayerStart+1 笔刷),在里头用 Blockout Tools 的 BP 积木(Blockout_Box/Ramp/Stairs 等,Place Actors 搜 Blockout)画白盒;看到的主要是天空+笔刷属正常。
+
+### 16.3 给下一个 AI
+
+- 同步轮 diff 里凡出现 `Source/` 或新插件目录:**拉完必重编**,并验证 `Plugins/<新插件>/Binaries/Win64/*.dll` 生成(新模块不会走 GravityShift 的 dll 时间戳检查,要单独看)
+- 队友报"看不到东西"排查链:①本地有没有 pull ②pull 的 diff 里有没有 C++ → 重编了没 ③地图非 WP 就查 Actor 数(空图≠坏图,Blockout 本来就是起点图)

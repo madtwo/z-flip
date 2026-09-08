@@ -29,7 +29,13 @@ python .../ue.py py "import unreal; print(unreal.SystemLibrary.get_project_direc
 ```
 (队友机器上脚本在仓库 `AgentSkill/ue-nocode/reference/`)
 
-## 3. 编译(改 C++ 后)
+## 3. 拉队友更新 SOP(git pull 之后)
+
+1. 先看 diff 里有没有 C++:`git diff --stat HEAD@{1} HEAD | grep -E "Source/|Plugins/"`(或看拉取脚本打印的文件清单)
+2. **有 C++/新插件 → 关编辑器 → 走 §4 编译 → 验证新模块 dll 生成(`Plugins/<新插件>/Binaries/Win64/`)→ 再开编辑器**。跳过这步就是队友报的"看不到东西"(插件加载不了,依赖插件的地图打开是空的)
+3. 验证新地图:打开数 Actor(注意有的图本来就是"起点图",比如 Blockout 只有灯光+PlayerStart+笔刷,空≠坏)
+
+## 4. 编译(改 C++ 后)
 
 ```bash
 DOTNET_ROOT="D:/UE_5.8/Engine/Binaries/ThirdParty/DotNet/10.0/win-x64" \
@@ -39,7 +45,7 @@ ZFlipEditor Win64 Development "-project=D:/UE/z-flip/z-flip.uproject" -WaitMutex
 ```
 先关编辑器再编(dll 被锁);约 15s。
 
-## 4. 五条铁律(全部真实踩过,细节在 skill 的 reference/ 里)
+## 5. 五条铁律(全部真实踩过,细节在 skill 的 reference/ 里)
 
 1. **远程 python 执行期间 PIE 世界暂停**——测动态行为必须"发射→退出脚本→隔秒再读",脚本内 sleep 读到的全是冻结值
 2. **PIE 撞蓝图编译错误会弹模态框,像编辑器死机**——先 get_app_state 找模态框,别 taskkill
@@ -47,13 +53,14 @@ ZFlipEditor Win64 Development "-project=D:/UE/z-flip/z-flip.uproject" -WaitMutex
 4. **睡眠刚体/翻转类评审清单**:力矩轴 `Up×Desired`(写反=操作镜像)、弹簧臂 `bInheritPitch` 必须真、反重力线必须大于房间内最大落体冲击
 5. 中文路径/中文字面量进 bash 会被编码层搅乱——文件操作走 python,PS 脚本写 UTF-8-BOM 文件再执行
 
-## 5. 当前状态速记(2026-09-02 晚)
+## 6. 当前状态速记(2026-09-07)
 
-- 已实测:小球 WASD 移动+制动、G 翻转(球+方块,方块贴天花板不翻滚)、落地三档(150/2000 分界,单次弹跳锁存)、摄像机 180° 跟转
-- 遗留:E 开关、KillVolume/表面体积实机触发、高落差反重力展示(本房间达不到 2000 阈值)、z-flip 后续玩法迭代
-- 完整验收证据与每轮修复:`HANDOVER_zflip.md` §8/§9/§10
+- v7:六方向重力+导轨相机+落地三带网格联动(≤4安静/5-6反弹/≥7反重力)+拾取/钥匙/门 F 交互链,全部 PIE 实测(§8-§15)
+- 白盒:Blockout Tools 插件已入库(v1.52,含 C++,改完必重编),起点图 `Content/Maps/Blockout.umap`;关卡侧 AI 积木拼装手册 `AgentSkill/gs-block-assembly/SKILL.md`
+- 已知未修:滑门落座偏差(§14.6-1,用户拍板暂不修);7格反转边界待用户前台实机确认(§13.5)
+- 完整验收证据与每轮修复:`HANDOVER_zflip.md` §8-§16
 
-## 6. GitHub 同步(需要推代码时)
+## 7. GitHub 同步(需要推代码时)
 
 git 协议在本机被墙(api.github.com 间歇可用)。用仓库内 `AgentSkill/ue-nocode/reference/push_via_api.py`:
 ```bash
