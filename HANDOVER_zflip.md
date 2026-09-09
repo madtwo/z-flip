@@ -684,3 +684,52 @@ Manager 由 GameMode BeginPlay 自动 spawn,BeginPlay **可能延迟到下一 ti
   3. 试过弹簧臂自带相机滞后(`bEnableCameraLag`),压不住 ~1.5Hz 方波,已关。
 - **实测**(同法逐帧日志):楼梯段相机 X 每帧平滑 +15~22cm(修复前 ±500cm 翻转),俯仰稳定在 −1°±3°(修复前摆到 +14.6°),离开楼梯后臂长平滑回到 700。探针命中信息也进了日志(`hit=` 字段,本例 StaticMeshActor_11)。
 - **注意**:相机"抖动/突变"类问题**必须看逐帧日志**(C++ 内 gated log)——python 采样在后台节流下每秒只能采 ~3 帧,会漏掉翻转;两个调试开关默认关,不影响发布行为。
+
+## 20. 2026-09-09 第十四轮:小球不可推动可移动物块(质量方案,数据改动)
+
+- **目标/根因**:小球(30kg)撞可移动物块会被推开——推动是**纯物理求解器接触冲量**,球↔物块间**无任何 OnComponentHit 代码**可拦。要“球推不动、但块仍受重力/翻转正常移动、且对球保持实心”,唯一不破坏实心语义的杠杆是**质量**。
+- **关键前提**:`UGSGravityBodyComponent::Tick` 用 `AddForce(..., bAccelChange=true)` 施加**加速度**(`GSGravityBodyComponent.cpp:211`),质量无关 → 调大物块质量**不影响重力翻转/下落速度**,只增加抵抗小球冲量的惯性。
+- **改动内容(Profile 数据,非代码)**:
+  - `DA_GS_Block_Gravity.MassOverrideKg` **40 → 5000**(小球 30kg,冲量分享 ≈30/(30+5000)≈0.6%,1600cm/s 撞上块只获 ≈19cm/s 且被 `TangentDragHz` 0.15 衰减 → 观感推不动)。
+  - **不改** `DA_GS_Block_GravityBreaker`(保持 90):砸碎能量 `0.5·m·v²` 随质量,调大会让 Breaker 一击碎万物。
+  - 生效链:块 `BeginPlay → ApplyBlockProfile → ApplyCurrentConfiguration → Mesh->SetMassOverrideInKg`(`GSBlockBase.cpp:147-150`),一处 Profile 改动全体使用该 Profile 的块生效。
+- **脚本(已入库 `Plugins/GravityShift/Content/Python/v5/`)**:
+  - `set_gravity_block_mass.py` —— 只改 `DA_GS_Block_Gravity` 一个资产(**首选**,别跑全量 `generate_data_assets.py`,那会重写所有 Profile)。
+  - `set_movable_blocks_mass.py` —— 对**当前打开的关卡**批量处理:筛选 `bStartSimulatingPhysics && bAffectedByGravity && !bCanBreakTargets`,设 5000 并 `apply_current_configuration()`,存关卡。
+- **已知限制/待办**:
+  - 质量 5000 在 PhysX 安全区(<1e6),高帧率骤降时重物堆叠可能偶尔微陷,可接受。
+  - 小球撞 5000kg 块时**自身会反弹**——物理实心语义的正常表现。
+  - “同一 Profile 全体变重”:若要逐块精细控制可推性,需复制 Profile 或用编辑器逐实例覆盖。
+  - **PIE 验证待编辑器执行**(本轮编辑器未开):①球 1600cm/s 撞块纹丝不动;②G 翻转块正常下落/翻转;③球仍可在块上滚动/被挡。同步的 C++ 落地改动(网格三带 10/20/10 + 静落归零,§19.9 未单列)尚未编译验证,下次进编辑器一起做。
+- **更新(19:40,UBT 重编译通过)**:`ZFlipEditor Win64 Development` 增量编译成功(27s,`GSLandingResponseComponent.cpp` + 模块重链,DLL mtime 19:39)。编辑器重启后经 MCP 读 CDO 确认:**QuietLandingMaxCells=10.0 / GravityReverseMinCells=20.0 / BounceToHeightCells=10.0** —— 改动 1+改动 3 已实际进运行态。剩余 PIE 三检(①块撞不动②G 翻转③球站立)与 §19.9 手感/分界(≤10 静落/10–20 反弹/≥20 反重力)待实测。
+
+## 21. 2026-09-09 第十五轮:落地手感收敛——网格三带阈值重定(4/7/4→10/20/10)+ 静落归零 + 接触零回弹(Restitution=0)
+
+- **目标/根因链(实测定位)**:落地带旧值 4/7/4 太激进,普通小落差就进反弹带;且球落定后总"ride on residual normal speed"+ 求解器接触微弹(引擎默认 restitution **0.3**,`PhysicalMaterial.cpp:47`,球无材质覆盖 → 每次接触按 0.3 弹)让球带一会上跳(GROUNDED_RISING 追踪)。逐层往下拆:先代码层 QUIET-ZERO + settle guard 压制(打地鼠),spawn/接触残余上跳仍压不住 → 怀疑到求解器 restitution → 本轮直接归零,源头断掉。**三改动是一条链:阈值定"该不该动",零回弹定"动了之后落定即稳",guard 从主治降为纵深**。
+- **改动 1:网格三带阈值 4/7/4 → 10/20/10(落地弹跳与反重力阈值,`GSLandingResponseComponent.h` 默认值)**
+  - `QuietLandingMaxCells` **4→10**:impact ≤ v(10 格)静落,不做任何响应;
+  - `GravityReverseMinCells` **7→20**:impact ≥ v(20 格)自动反重力;
+  - `BounceToHeightCells` **4→10**:介于两者间(10–20 格落差)落地 → 以 v(10 格)速弹回原高。
+  - 阈值动态推导:v(cells)=√(2·g·cells·cell),g=1600×球 GravityScale、cell=100cm → 实测静落 <1789cm/s、反重力 >2482cm/s、之间 1789cm/s 弹回(LAND diag 数值即此)。
+  - **反重力下沿内收 0.75 格**:帧率掉时下落采样比真实低百分之几,精确 20 格落地的 v 会落在采样噪声内;内收 0.75 格让"正好 20 格"判定果断、19 格(v19 采样永不过冲)仍弹回。
+- **改动 2:静落归零 + 0.4s settle guard**(`GSLandingResponseComponent.cpp/.h`)
+  - 静落带落地瞬间把**重力轴速度归零、保留切向**(v_after 只留水平)——否则球带残余法向速度"ride"一下再停;
+  - 随后 0.4s 窗口内(仍 probe 支持)把任何把球带离表面的重力轴运动压回静止噪声底(18cm/s)——治"刚落稳被求解器微顶一下"的可见小跳;窗口制 → 弹跳带/反重力的合法离地永不误压。旧注释的 4/7/4 语义一并更新成 10/20/10。
+- **改动 3:接触零回弹 Restitution=0**(`GSRollingBallPawn.cpp:36`,唯一源文件)
+  - `NewObject<UPhysicalMaterial>(Transient,"GSBallZeroRestitution")` → Restitution=0 + **bOverrideRestitutionCombineMode=true + CombineMode=Min**,挂 `BallCollision->SetPhysMaterialOverride`。
+  - **Min 合并是必须**:项目默认 Average 会把(球0+地面0.3)/2=0.15 消不干净;Min 让 Min(0,任意表面)=0,**球对任何表面恒不回弹,不用动地面/块材质**;摩擦 0.7 不动,手感不变。纯运行时 NewObject,无内容资产、零打包依赖。
+  - 代码弹跳全部直接写线速度(BOUNCE/QUIET-ZERO/reverse),不经 restitution → 蹦床/反重力照常。include 走 5.8 新路径 `PhysicalMaterials/PhysicalMaterial.h`(旧 `PhysicsEngine/` 已删)。
+- **改动文件清单(落地批次;块质量属 §20,同在工作区未 commit 需区分)**:
+  - 代码:`GSLandingResponseComponent.h/.cpp`(改动1+2 + TEMP-DIAG)、`GSRollingBallPawn.cpp`(改动3)。
+  - §20 另计:`DA_GS_Block_Gravity.uasset`+`generate_data_assets.py`(质量 40→5000)、新增两块质量脚本、`测试案例.umap`(临时摆场,入库前清理)。
+  - `[GSLandDiag]` TEMP-DIAG(LAND/QUIET-ZERO/BOUNCE/GROUNDED_RISING)是追踪残留微弹的**临时日志,确认后必摘**。
+- **PIE 实测(2026-09-09 晚;改动3 已编译,DLL mtime 21:18:33,编辑器重启读进程 Module 确认加载新模块)**:
+  - ✅ 球 spawn 后、每次受扰后都回**精确静止**(loc 49.50,vel 0.000×3),无发散/持续弹跳。
+  - ⚠️ **spawn 瞬态仍在**:开局 ~66cm 衰减跳(LAND impact 461→435→212,~7s 归零)——restitution=0 下仍发生 → **不是 restitution**,是球生成吃地 0.5cm(中心 z=49.5,半径 50)的穿透恢复;想消:让球以中心 z=半径 静止高度生成。
+  - ⚠️ 脚本注入速度测"干净落地"不可靠(python 暂停世界设速→恢复 + CCD 非弹道瞬态)→ 手感项留实机。
+  - ❓ §20 三检(球撞 5000kg 块不动 / G 翻转块下落 / 球站块上)仍未做,编辑器已开可顺手补。
+- **已知限制/待办(给下一个 AI/队友)**:
+  1. §20 PIE 三检 + 本批实机手感三档(≤10 格落定即稳 / 10–20 格弹回 / ≥20 格反重力)盖章。
+  2. 实机确认微弹消失后:摘 `[GSLandDiag]` 4 处 TEMP-DIAG;`QuietSettleGuard`+QUIET-ZERO(改动2)降为纵深,留可、删亦可。
+  3. spawn 穿透瞬态若碍眼 → 生成高度修正,独立于本批。
+  4. §20+§21 全部未 commit;提交时按"块质量数据 / 落地手感代码"拆两个 commit 更清晰。

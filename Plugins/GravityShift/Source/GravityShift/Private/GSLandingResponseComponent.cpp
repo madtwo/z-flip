@@ -93,8 +93,8 @@ FGSLandingModifierSpec UGSLandingResponseComponent::GetEffectiveLandingModifier(
 		// a few percent low at 60 fps, worse if the frame rate drops), so an exact
 		// v(ReverseMinCells) threshold sits inside that frame noise for a fall from exactly
 		// ReverseMinCells. Pulling the reverse edge three-quarters of a cell inward keeps an
-		// exact 7-cell drop decisive at playable frame rates while a 6-cell drop (v6, which
-		// the sampler never overshoots) still bounces.
+		// exact 20-cell drop decisive at playable frame rates while a 19-cell drop (v19,
+		// which the sampler never overshoots) still bounces.
 		Spec.AutoReverseAtSpeedCm = FallImpactSpeedForCells(FMath::Max(GravityReverseMinCells - 0.75f, 0.0f));
 		Spec.BounceSpeedCm = FallImpactSpeedForCells(BounceToHeightCells);
 	}
@@ -222,6 +222,33 @@ void UGSLandingResponseComponent::TickComponent(float DeltaTime, ELevelTick Tick
 
 	if (bSupported)
 	{
+		const double NowTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+
+		// Quiet-settle guard: right after a quiet landing the solver can micro-pop the
+		// ball off the surface it just settled on. While inside the window, damp any
+		// gravity-axis motion that would carry the ball away from the surface back to
+		// the resting contact-noise floor (the small +vz a resting ball always reads).
+		if (NowTime < SettleGuardUntilTime && TargetPrimitive)
+		{
+			const float RestNoise = 18.0f;
+			const float VelG = FVector::DotProduct(TargetPrimitive->GetPhysicsLinearVelocity(), Dir);
+			if (VelG < -RestNoise)
+			{
+				const FVector Clamped = TargetPrimitive->GetPhysicsLinearVelocity() - Dir * (VelG + RestNoise);
+				TargetPrimitive->SetPhysicsLinearVelocity(Clamped);
+			}
+		}
+
+		// TEMP-DIAG (quiet-bounce hunt): grounded but moving away along the gravity axis
+		// => an upward impulse the landing code did not issue (solver/restitution/edge pop).
+		static double LastRiseLog = -1e9;
+		const float VGroundedAlong = FVector::DotProduct(Velocity, Dir);
+		if (VGroundedAlong < -60.0f && (NowTime - LastRiseLog) > 0.3)
+		{
+			LastRiseLog = NowTime;
+			UE_LOG(LogTemp, Warning, TEXT("[GSLandDiag] GROUNDED_RISING v_along=%.0f while probe supported (external impulse?)"), VGroundedAlong);
+		}
+
 		if (!bWasSupported)
 		{
 			HandleLanding(FMath::Abs(CurrentFallSpeedCm));
@@ -273,6 +300,11 @@ void UGSLandingResponseComponent::HandleLanding(float ImpactSpeedCm)
 
 	const FGSLandingModifierSpec Mod = GetEffectiveLandingModifier();
 
+	// TEMP-DIAG (quiet-bounce hunt 2026-09-09; remove after root cause fixed)
+	UE_LOG(LogTemp, Warning, TEXT("[GSLandDiag] LAND impact=%.0f quiet<%.0f bounceV=%.0f rev>%.0f cdOk=%d bounced=%d"),
+		ImpactSpeedCm, Mod.NoResponseBelowImpactSpeedCm, Mod.BounceSpeedCm, Mod.AutoReverseAtSpeedCm,
+		(Now - LastResponseTime) >= LocalResponseCooldownSeconds, bBouncedSinceQuietLanding);
+
 	if (!bEnabled || Mod.bSuppressResponse)
 	{
 		Report.Action = EGSLandingResponseAction::SUPPRESSED;
@@ -294,6 +326,15 @@ void UGSLandingResponseComponent::HandleLanding(float ImpactSpeedCm)
 		// landing is allowed to bounce again.
 		bBouncedSinceQuietLanding = false;
 		LastLandingReport = Report;
+		// Quiet landing (no bounce / no reverse): zero the gravity-axis velocity so
+		// the ball settles instantly instead of riding on residual normal speed.
+		const FVector Dir = GravityManager ? GravityManager->GetGravityDirection() : FVector(0.0, 0.0, -1.0);
+		FVector Velocity = TargetPrimitive->GetPhysicsLinearVelocity();
+		const FVector NormalPart = Dir * FVector::DotProduct(Velocity, Dir);
+		const FVector Zeroed = Velocity - NormalPart;
+		TargetPrimitive->SetPhysicsLinearVelocity(Zeroed);
+		SettleGuardUntilTime = Now + QuietSettleGuardSeconds;
+		UE_LOG(LogTemp, Warning, TEXT("[GSLandDiag] QUIET-ZERO impact=%.0f v_after=(%.0f,%.0f,%.0f)"), ImpactSpeedCm, Zeroed.X, Zeroed.Y, Zeroed.Z);
 		return;
 	}
 
@@ -333,6 +374,7 @@ void UGSLandingResponseComponent::HandleLanding(float ImpactSpeedCm)
 	const float Retention = bPreserveTangentialVelocityOnBounce ? Mod.BounceTangentialRetention : 0.0f;
 	Velocity = -Dir * Mod.BounceSpeedCm + TangentPart * Retention;
 	Prim->SetPhysicsLinearVelocity(Velocity);
+	UE_LOG(LogTemp, Warning, TEXT("[GSLandDiag] BOUNCE relaunch_along=%.0f v=(%.0f,%.0f,%.0f)"), Mod.BounceSpeedCm, Velocity.X, Velocity.Y, Velocity.Z);
 
 	Report.Action = EGSLandingResponseAction::BOUNCE;
 	bBouncedSinceQuietLanding = true;

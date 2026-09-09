@@ -44,9 +44,9 @@ public:
 	// ---- Grid-linked landing response ----
 	// When enabled, the three landing bands below are derived from the world's block
 	// grid cell height and the current gravity (v(cells) = sqrt(2*g*cells*cell)),
-	// instead of the raw cm/s fields further down: a landing at impact <= v(4 cells)
-	// is ignored, v(7 cells) and above reverses gravity, and in between the ball
-	// bounces back up to a v(4 cells) launch speed. A landing modifier applied by a
+	// instead of the raw cm/s fields further down: a landing at impact <= v(10 cells)
+	// is ignored, v(20 cells) and above reverses gravity, and in between the ball
+	// bounces back up to a v(10 cells) launch speed. A landing modifier applied by a
 	// volume still overrides all of this with its explicit cm/s values.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Landing|Grid")
 	bool bGridBasedLanding = true;
@@ -55,13 +55,13 @@ public:
 	float GridCellSizeCm = 100.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Landing|Grid", meta = (ClampMin = "0.0"))
-	float QuietLandingMaxCells = 4.0f;
+	float QuietLandingMaxCells = 10.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Landing|Grid", meta = (ClampMin = "0.0"))
-	float GravityReverseMinCells = 7.0f;
+	float GravityReverseMinCells = 20.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Landing|Grid", meta = (ClampMin = "0.0"))
-	float BounceToHeightCells = 4.0f;
+	float BounceToHeightCells = 10.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift", meta = (ClampMin = "0.0"))
 	float NoResponseBelowImpactSpeedCm = 150.0f;
@@ -83,6 +83,16 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift", meta = (ClampMin = "0.0"))
 	float LocalResponseCooldownSeconds = 0.25f;
+
+	// After a quiet landing the physics solver can still emit a small upward impulse
+	// for a few frames (contact micro-pop), so the ball visibly hops off the ground it
+	// just settled on. While within this window after a quiet landing AND still
+	// probe-supported, re-zero any gravity-axis motion that would carry the ball away
+	// from the surface, down to the resting contact noise floor. Window-only so the
+	// bounce band / auto-reverse relaunch (which legitimately leave the surface) is
+	// never damped.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Landing", meta = (ClampMin = "0.0"))
+	float QuietSettleGuardSeconds = 0.4f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift", meta = (ClampMin = "0.0"))
 	float AutomaticRetrySeconds = 0.50f;
@@ -164,6 +174,7 @@ protected:
 	float CurrentFallSpeedCm = 0.0f;
 	float CurrentFallDistanceCm = 0.0f;
 	float LastResponseTime = -1000.0f;
+	float SettleGuardUntilTime = -1000.0f;
 	FGSLandingReport LastLandingReport;
 
 	UPROPERTY()

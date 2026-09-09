@@ -86,7 +86,7 @@ def main():
 
     block_gravity = make_asset("Profiles", "DA_GS_Block_Gravity", unreal.GSBlockProfile)
     fill(block_gravity, profile_id="BLOCK_GRAVITY", start_simulating_physics=True,
-         affected_by_gravity=True, gravity_scale=1.0, mass_override_kg=40.0,
+         affected_by_gravity=True, gravity_scale=1.0, mass_override_kg=5000.0,
          maximum_speed_cm=3000.0)
 
     block_breaker = make_asset("Profiles", "DA_GS_Block_GravityBreaker", unreal.GSBlockProfile)

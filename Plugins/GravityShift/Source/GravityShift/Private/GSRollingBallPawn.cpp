@@ -5,6 +5,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "EngineUtils.h"
 #include "Engine/World.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "UObject/ConstructorHelpers.h"
@@ -31,6 +32,20 @@ AGSRollingBallPawn::AGSRollingBallPawn()
 	BallCollision->SetCollisionProfileName(TEXT("PhysicsActor"));
 	BallCollision->SetUseCCD(true);
 	SetRootComponent(BallCollision);
+
+	// Zero restitution so natural contact bounce is removed at the solver layer:
+	// the engine default (PhysicalMaterial.cpp) is 0.3 and the ball ships no
+	// surface override, so every contact micro-bounced at 0.3 regardless of the
+	// landing-response code. Force the combine rule to Min so the ball never
+	// restitutes against any world surface (0 + anything => 0); all bounce and
+	// anti-gravity launch is applied by code (LandingResponse) instead.
+	{
+		UPhysicalMaterial* PhysMat = NewObject<UPhysicalMaterial>(GetTransientPackage(), TEXT("GSBallZeroRestitution"));
+		PhysMat->Restitution = 0.0f;
+		PhysMat->bOverrideRestitutionCombineMode = true;
+		PhysMat->RestitutionCombineMode = EFrictionCombineMode::Min;
+		BallCollision->SetPhysMaterialOverride(PhysMat);
+	}
 
 	BallMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("BallMesh"));
 	BallMesh->SetupAttachment(BallCollision);
