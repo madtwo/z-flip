@@ -26,6 +26,7 @@
 - **真相**:`ue_pyexec.py`/MCP 的 python **执行期间 PIE 世界暂停**(时钟冻结),脚本退出后恢复;脚本之间的真实时间里世界正常 tick。
 - **正确测法**:**发射后立即退出脚本**(fire)→ bash `sleep N`(世界自由跑)→ 新脚本读结果(read)。所有动态观测都用这个三段式。
 - 旁支:编辑器窗口在后台时 UE **深度节流**(真实 1s ≈ 零点几秒游戏时间),取样留足裕量;让用户游玩时把编辑器切前台。
+- **亚秒级过渡的粗采样:时间膨胀放慢游戏时间**——`unreal.GameplayStatics.set_global_time_dilation(w, 0.05)`(物理/平滑在游戏时间里行为不变)。ue.py 每次调用固定开销 ~1.7s 实时,不膨胀只能采到 ~1.7s 游戏时间的粒度;膨胀 20× 后一次调用只推进 ~0.085s 游戏时间,1.2s 的相机过渡可采到 15+ 个点(2026-09-09 G 翻转过渡实测:偏移圆弧连续、总时长与理论吻合)。测完务必恢复 1.0。
 - **暂停/恢复会给下一帧塞异常 dt(可为负)**:脚本执行→恢复的瞬间,`DeltaSeconds` 可能异常甚至为负——指数平滑代码 α<0 会**外推到目标反方向**(2026-09-03 轨相机实测:锁轴相机一度偏出 28.4cm 后又自愈)。C++ 里凡做平滑/积分的 Tick 代码一律 `DeltaSeconds = FMath::Clamp(DeltaSeconds, 0.f, 0.1f)`;远程验证平滑类行为读到"离谱后又恢复"的读数,先怀疑这个,别急着改数学。
 
 ## 坑 3:弹出窗口偷键盘焦点
@@ -77,7 +78,16 @@ pawn  = unreal.GameplayStatics.get_player_pawn(w, 0)
 - 编辑器层摆测试 actor + PIE 时,autosave 会把脏关卡**写穿到真 umap 文件**(哪怕事后 destroy actor,磁盘 diff 已发生)。
 - **标准处置**:PIE 测试跑完第一件事 `git status` 查 umap → 脏了就 `git checkout -- <umap>` 回退;测试 actor 在编辑器世界 destroy 后重载 `EditorLoadingAndSavingUtils.load_map` 清脏标记更稳。
 - `EditorLoadingAndSavingUtils` 没有 `set_dirty_package`;治本:能不开编辑器世界摆场的验收,改在 PIE 世界里临时 spawn。
+- **污染不止 umap,CDO 改动会脏 .uasset**:远程 python 里 `get_default_object(类).set_editor_property(...)` 设调试标记 → BP 包变脏 → autosave 把调试默认值写进 .uasset → 它会混进下一次 commit。commit 前 `git status --short` 审查,多出来的 .uasset 照样 checkout 恢复(2026-09-08 BP_GSRollingBallPawn 实例,amend 摘掉)
+
+## 逐帧行为数据的正确采集法:C++ 内日志,不是 python 采样(2026-09-08 相机抖动轮定案)
+
+- python 组播执行期间 PIE 世界暂停,脚本之间才恢复——python 只能采到"粗粒度时间点",**永远采不到逐帧**。要逐帧数据(抖动/平滑/泄漏量),在 C++ 里加 UPROPERTY 门控(默认关)的逐帧 `UE_LOG`,PIE 里把开关设在**PIE 实例**上(别走 CDO,见 PYTHON_API_PITFALLS),跑完解析 `Saved/Logs/<项目>.log`
+- 打点技巧:**读"写入前"的状态**(如相机枢轴上帧写入值被本帧漂移到哪),它减上帧写入值=每帧泄漏量,直接定位"谁绕过了平滑层"
+- 解析用 python 正则逐行抽数、算 mean/max——日志行即帧,统计即证据(本次:39 帧漂移全 0,一眼定案)
 - **checkout 撞 "unable to unlink ... Invalid argument"**:编辑器正加载着该 umap,句柄占用。三步回退:`load_map('/Engine/Maps/Templates/Template_Default')` 切走 → `git checkout -- <umap>` → `load_map('/Game/原关卡')` 切回(2026-09-05 实测)
+- **复现"需要持续输入"的场景(爬楼梯/长距离滚动):别用 OS 按键注入**,加一个 UPROPERTY 门控的"自动前推"调试开关(每 tick 覆盖 MoveInput 为满前推,如 `bDebugAutoDriveForward`),脚本把球放到起点即可自动跑完全程——与逐帧日志配套(2026-09-09 爬楼梯相机抖动轮实测)。注意 `set_move_input` 只生效一帧(PollNativeInput 每 tick 用键盘状态覆盖),持续驱动必须走 C++ 开关。
+- **日志行=帧,别把采样间隔当帧间隔**:编辑器在后台深度节流时一帧真实 dt≈0.3s、游戏 dt 被钳到 0.1,日志仍是逐帧;解析出的"相邻行"就是相邻帧,方波状跳变=逐帧翻转,不是采样混叠。
 
 ## 交接手册可行性验收法:模拟对方处境(2026-09-05,手册"积木拼装"就靠这个落地)
 
@@ -86,3 +96,12 @@ pawn  = unreal.GameplayStatics.get_player_pawn(w, 0)
 - 编辑器世界摆 StaticMeshActor:`EditorActorSubsystem` **只有 `spawn_actor_from_class`**(没有 spawn_actor);网格用 `static_mesh_component.set_static_mesh(load_asset(...))`
 - 这套跑一遍,写进手册的每一步都有实测背书,对方 AI 照抄不会掉坑
 
+
+## 坑 6:PIE 活跃时调 load_map = 游戏线程死锁(2026-09-08 实炸一次,代价=杀进程重启)
+
+- **场景**:用户正在 PIE 里玩,AI 的脚本调 `unreal.EditorLoadingAndSavingUtils.load_map(...)` 切图 → 游戏线程卡死,之后**所有远程通道(MCP 组播)全部超时**,窗口因线程阻塞连激活/点击都被拒 → 只能杀进程重启。
+- **铁律:任何 load_map/切关卡之前,先 `unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).is_in_play_in_editor()`,True 就绝不切图**(要么等用户退出 PIE,要么先 `editor_request_end_play()` 再切)。
+- **铁律加强(2026-09-08 第二次踩,又杀了一次进程):`end_play()` 和 `load_map()` 绝不能写在同一个脚本里**——end_play 是异步请求,同一脚本里紧跟的 load_map 仍会撞进未结束的 PIE 直接死锁。正确姿势:end_play 单独一个脚本 → **下一个脚本先验证 `is_in_play_in_editor()==False`** → 再 load_map。load_map 之前先扫日志尾部有没有 PIE 活动(用户可能正在玩)。
+- 临时校准/测试台:一次性关卡(new_level)最干净,用完删;**校准地板要厚**(≤50cm 薄板会被高速球穿透,球一穿数据全污染——用 ≥500cm 厚板或保证顶面平稳)。
+- 判断"卡死还是慢":日志尾部还在出帧 → 慢;停在某行不动 + 双通道超时 + 窗口激活失败 → 死锁,别反复重试,先看有没有未保存内容(编辑器右下角"所有已保存"),能杀就杀。
+- 相关:用户可能**正在玩**(日志里会有 `[GravityShift] dir=...` 等游玩痕迹),动手切图/摆件前先扫一眼日志尾部有没有 PIE 活动。

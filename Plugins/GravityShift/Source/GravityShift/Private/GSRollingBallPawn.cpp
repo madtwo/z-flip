@@ -4,6 +4,7 @@
 #include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "EngineUtils.h"
+#include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "UObject/ConstructorHelpers.h"
@@ -105,9 +106,17 @@ void AGSRollingBallPawn::BeginPlay()
 	}
 
 	CameraArm->TargetArmLength = CameraArmLengthCm;
+	// 相机臂长由 UpdateCamera 的自建探针+平滑接管:弹簧臂自带探针在台阶/平台边缘会
+	// 700↔175 逐帧翻转,相机被前后拽动 ±500cm(爬楼梯画面抖动)。自带探针与滞后都关。
+	CameraArm->bDoCollisionTest = false;
+	CameraArm->bEnableCameraLag = false;
 
 	TargetCameraUp = bCameraFlipsWithGravity ? -GetActiveGravityDirection() : FVector::UpVector;
 	CurrentCameraUp = TargetCameraUp;
+	// 兼容旧序列化实例的 CameraYawDegrees:开局把航向从旧偏航角换算出来,此后航向
+	// 是唯一朝向状态(旧属性不再参与计算)。
+	CameraAimHeading = FQuat(FVector::UpVector, FMath::DegreesToRadians(CameraYawDegrees))
+		.RotateVector(FVector::ForwardVector);
 	CurrentCameraRotation = BuildCameraRotation(TargetCameraUp);
 	bCameraRotationReady = true;
 
@@ -187,6 +196,9 @@ void AGSRollingBallPawn::ApplyBallProfile(UGSBallProfile* NewProfile)
 	}
 
 	RollTorqueAcceleration = NewProfile->RollTorqueAcceleration;
+	StopTorqueAcceleration = NewProfile->StopTorqueAcceleration;
+	DriveAccelerationCm = NewProfile->DriveAccelerationCm;
+	ReleaseBrakeHz = NewProfile->ReleaseBrakeHz;
 	MaximumPlanarSpeedCm = NewProfile->MaximumPlanarSpeedCm;
 	bClampPlanarSpeed = NewProfile->bClampPlanarSpeed;
 	bAllowAirControl = NewProfile->bAllowAirControl;
@@ -231,7 +243,7 @@ FVector AGSRollingBallPawn::GetActiveGravityDirection() const
 	return GravityManager ? GravityManager->GetGravityDirection() : FVector(0.0, 0.0, -1.0);
 }
 
-FQuat AGSRollingBallPawn::BuildCameraRotation(const FVector& UpVector) const
+FQuat AGSRollingBallPawn::BuildCameraRotation(const FVector& UpVector, float AdditionalPitchDegrees) const
 {
 	FVector Up = UpVector.GetSafeNormal();
 	if (Up.IsNearlyZero())
@@ -239,12 +251,23 @@ FQuat AGSRollingBallPawn::BuildCameraRotation(const FVector& UpVector) const
 		Up = FVector::UpVector;
 	}
 
-	const FQuat AlignUp = FQuat::FindBetweenNormals(FVector::UpVector, Up);
-	const FQuat YawQuat = FQuat(Up, FMath::DegreesToRadians(CameraYawDegrees));
-	const FQuat Base = YawQuat * AlignUp;
+	// 世界航向投影到目标上轴平面:±Z 翻转(G)时航向保持原世界方向,视角翻转后
+	// 仍对准同一个方向(旧实现把偏航角绕"新上轴"重算,+Z/-Z 符号互换导致瞄准方向
+	// 镜像,且 FindBetweenNormals 在反向平行时旋转轴不确定)。
+	FVector Forward = CameraAimHeading - Up * FVector::DotProduct(CameraAimHeading, Up);
+	Forward = Forward.GetSafeNormal();
+	if (Forward.IsNearlyZero())
+	{
+		// 航向几乎平行于上轴(比如墙态重力):退化到世界前向的投影。
+		Forward = FVector::ForwardVector - Up * FVector::DotProduct(FVector::ForwardVector, Up);
+		Forward = Forward.GetSafeNormal();
+	}
+	const FVector Right = FVector::CrossProduct(Up, Forward).GetSafeNormal();
 
-	const FVector Right = Base.RotateVector(FVector::RightVector);
-	const FQuat PitchQuat = FQuat(Right, FMath::DegreesToRadians(-CameraPitchDegrees));
+	const FQuat Base = FRotationMatrix::MakeFromXZ(Forward, Up).ToQuat();
+	const float TotalPitch = FMath::Clamp(CameraPitchDegrees + AdditionalPitchDegrees,
+		-MaximumCameraPitchDegrees, MaximumCameraPitchDegrees);
+	const FQuat PitchQuat = FQuat(Right, FMath::DegreesToRadians(-TotalPitch));
 	return PitchQuat * Base;
 }
 
@@ -254,6 +277,9 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 	{
 		return;
 	}
+
+	// 平滑/积分一律钳位 dt(PIE 暂停恢复/掉帧会塞进异常甚至负 dt,指数平滑会外推)。
+	DeltaSeconds = FMath::Clamp(DeltaSeconds, 0.0f, 0.1f);
 
 	// Rail camera: the position rides the level's camera rail and the view is
 	// rebuilt around world up with a small clamped gimbal. The chase rig below
@@ -289,7 +315,8 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 	if (bRailCamActive)
 	{
 		bRailCamActive = false;
-		CameraArm->bDoCollisionTest = true;
+		// 回退相机的地形适配由下面自建探针负责(自带探针在台阶边缘逐帧翻转,已关)。
+		CameraArm->bDoCollisionTest = false;
 		CameraArm->TargetArmLength = CameraArmLengthCm;
 	}
 
@@ -304,12 +331,122 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 	else
 	{
 		// Quaternion slerp: safe across a 180 degree flip (never Euler interpolation).
-		const float Alpha = 1.0f - FMath::Exp(-DeltaSeconds / FMath::Max(CameraFlipDurationSeconds, 0.001f));
+		// 时按角距自适应:大角度翻转保留防晕慢速;鼠标微调近乎即时(旧实现统一
+		// CameraFlipDurationSeconds,鼠标转向拖 0.35s 的"严重惯性")。
+		const float AngleDeg = FMath::RadiansToDegrees(CurrentCameraRotation.AngularDistance(Target));
+		const float Tau = CameraFlipDurationSeconds
+			* FMath::Clamp(AngleDeg / 90.0f, 0.12f, 1.0f);
+		const float Alpha = 1.0f - FMath::Exp(-DeltaSeconds / FMath::Max(Tau, 0.001f));
 		CurrentCameraRotation = FQuat::Slerp(CurrentCameraRotation, Target, Alpha);
 	}
 
-	const FVector Location = BallCollision ? BallCollision->GetComponentLocation() : GetActorLocation();
+	// 球放画面下三分之一:枢轴沿"支撑面上侧"(=−重力)抬升,随重力翻转平滑摆动
+	// (地板态相机在球上方,天花板态在球下方的房间内侧——两侧都不颠倒画面)。
+	// 换边摆速 150°/s(≈1.2s 走完 180°,与视角翻转同步):摆快了枢轴会被拽着在
+	// 0.45s 内掠过 300cm,就是按下 G 时那记"相机猛地向下/上窜"的抖动来源。
+	const FVector SupportUp = (-GetActiveGravityDirection()).GetSafeNormal();
+	CameraLiftDirection = FMath::VInterpNormalRotationTo(CameraLiftDirection, SupportUp, DeltaSeconds, 150.0f);
+	const FVector BallLoc = BallCollision ? BallCollision->GetComponentLocation() : GetActorLocation();
+	// 碰撞探针把臂压短时,抬升等比缩短 → 球的角取景恒定(贴墙不出房、球不出框)。
+	// —— 相机臂长:自建探针 + 去弹平滑(替掉弹簧臂自带探针的逐帧翻转)——
+	// 自带探针在台阶/平台边缘会 700↔175 逐帧翻转,相机被前后拽动 ±500cm(爬楼梯画面
+	// 抖动主因)。改为:沿"枢轴→期望相机位"打 ECC_Camera 探针;命中立即收短(防穿墙),
+	// 只有连续 0.25s 无命中才缓慢放长——翻转被去弹,相机稳定不再弹跳。
+	const FVector PivotLoc = CameraPivot->GetComponentLocation();
+	const FVector ArmDir = -CurrentCameraRotation.GetForwardVector();
+	const FVector DesiredCamPos = PivotLoc + ArmDir * CameraArmLengthCm;
+	float SafeArmCm = CameraArmLengthCm;
+	FString ArmHitName = TEXT("none");
+	{
+		FHitResult ArmHit;
+		FCollisionQueryParams ArmParams(SCENE_QUERY_STAT(GSFallbackCamProbe), false, this);
+		if (GetWorld()->LineTraceSingleByChannel(ArmHit, PivotLoc, DesiredCamPos, ECC_Camera, ArmParams))
+		{
+			SafeArmCm = FMath::Max((ArmHit.Location - PivotLoc).Size() - 20.0f, 40.0f);
+			if (ArmHit.GetActor())
+			{
+				ArmHitName = ArmHit.GetActor()->GetName();
+			}
+		}
+	}
+	if (SmoothedArmLengthCm < 0.0f)
+	{
+		SmoothedArmLengthCm = SafeArmCm;
+	}
+	if (SafeArmCm < CameraArmLengthCm - 1.0f)
+	{
+		ProbeClearSeconds = 0.0f;
+		SmoothedArmLengthCm = FMath::FInterpTo(SmoothedArmLengthCm, SafeArmCm, DeltaSeconds, 8.0f);
+	}
+	else
+	{
+		ProbeClearSeconds += DeltaSeconds;
+		if (ProbeClearSeconds > ArmExtendHoldSeconds)
+		{
+			SmoothedArmLengthCm = FMath::FInterpTo(SmoothedArmLengthCm, CameraArmLengthCm, DeltaSeconds,
+				FMath::Max(ArmLengthInterpSpeed, 0.1f));
+		}
+	}
+	CameraArm->TargetArmLength = SmoothedArmLengthCm;
+	const float LiftScale = FMath::Clamp(SmoothedArmLengthCm / FMath::Max(CameraArmLengthCm, 1.0f), 0.0f, 1.0f);
+	const FVector TargetPivot = BallLoc + CameraLiftDirection * CameraPivotLiftHeightCm * LiftScale;
+	// 位置指数平滑:G 的平移过渡/翻滚带抖动都被滤掉(导轨相机同款手法)。
+	if (!bPivotSmoothed)
+	{
+		SmoothedPivotLocation = TargetPivot;
+		bPivotSmoothed = true;
+	}
+	else
+	{
+		const float PosAlpha = 1.0f - FMath::Exp(-FMath::Max(CameraFollowInterpSpeed, 0.1f) * DeltaSeconds);
+		SmoothedPivotLocation = FMath::Lerp(SmoothedPivotLocation, TargetPivot, PosAlpha);
+	}
+	const FVector Location = SmoothedPivotLocation;
 	CameraPivot->SetWorldLocationAndRotation(Location, CurrentCameraRotation);
+	CurrentCameraUp = CurrentCameraRotation.RotateVector(FVector::UpVector);
+
+	// 角度微调:轴向瞄准"球 + 抬升方向上的 AimUp"——把球压回画面下/上三分之一。
+	// (地板态微俯 −1°,天花板态微抬 +17°)。俯仰必须从相机实际位置(枢轴沿水平
+	// 航向后退一个臂长)起算,从枢轴起算会把瞄准点投影成垂直方向(俯仰打满钳位)。
+	// (判别项与瞄准点均改用平滑后的抬升方向,理由见下方。) 
+	// 角度微调:轴向瞄准"球 + 抬升方向上的 AimUp"——把球压回画面下/上三分之一。
+	// ⚠ 必须用平滑后的 CameraLiftDirection,不能用瞬间换边的 SupportUp:否则 G 按下
+	// 那一帧瞄准点瞬移 ~284cm,画面俯仰瞬间跳 ~22°(用户反馈的"突变"),随后又随枢轴
+	// 慢慢飘回来。改用抬升方向后瞄准点与枢轴同步沿弧线连续移动,俯仰全程只变 ~1°。
+	// 判别项同样用 dot(抬升方向,世界上):收敛后与 dot(支撑上,世界上) 等价,过程中连续。
+	// 瞄准高度随抬升缩放同比收缩(与枢轴抬升同源):臂被压短时构图不变,俯仰不甩。
+	const float AimUp = (CameraAimUpBaseCm
+		+ CameraAimUpSwingCm * FVector::DotProduct(CameraLiftDirection, FVector::UpVector)) * LiftScale;
+	const FVector AimTarget = BallLoc + CameraLiftDirection * AimUp;
+	FVector HeadingHoriz = CameraAimHeading - TargetCameraUp * FVector::DotProduct(CameraAimHeading, TargetCameraUp);
+	HeadingHoriz = HeadingHoriz.GetSafeNormal();
+	if (HeadingHoriz.IsNearlyZero())
+	{
+		HeadingHoriz = FVector::ForwardVector - TargetCameraUp * FVector::DotProduct(FVector::ForwardVector, TargetCameraUp);
+		HeadingHoriz = HeadingHoriz.GetSafeNormal();
+	}
+	// 用平滑后的实际臂长(不是配置的 700):臂长塌缩时瞄准点仍落在同一世界位置,
+	// 画面俯仰不会随探针收短而摆动(爬楼梯时相机贴近,旧写法会甩一下)。
+	const FVector CamPosApprox = Location - HeadingHoriz * SmoothedArmLengthCm;
+	const FVector LookDir = (AimTarget - CamPosApprox).GetSafeNormal();
+	const float AimPitchDeg = FMath::RadiansToDegrees(
+		FMath::Asin(FMath::Clamp(FVector::DotProduct(LookDir, TargetCameraUp), -1.0f, 1.0f)));
+
+	if (bFallbackCamDebugLog)
+	{
+		// 逐帧落盘(爬楼梯抖动诊断):ballZ=物理输入,pivot=平滑后,target=平滑前,
+		// cam=弹簧臂实测相机位(含探针压臂),arm/scale=探针压臂与抬升缩放,pitch=瞄准俯仰。
+		const FVector CamNow = CameraArm->GetSocketLocation(NAME_None);
+		UE_LOG(LogTemp, Log, TEXT("[FallbackCam] t=%06.2f dt=%.4f ballZ=%.1f pivot=(%.1f,%.1f,%.1f) target=(%.1f,%.1f,%.1f) cam=(%.1f,%.1f,%.1f) arm=%.1f raw=%.1f hit=%s scale=%.2f pitch=%.2f"),
+			GetWorld()->GetTimeSeconds(), DeltaSeconds,
+			BallLoc.Z,
+			Location.X, Location.Y, Location.Z,
+			TargetPivot.X, TargetPivot.Y, TargetPivot.Z,
+			CamNow.X, CamNow.Y, CamNow.Z,
+			SmoothedArmLengthCm, SafeArmCm, *ArmHitName, LiftScale, AimPitchDeg);
+	}
+	CameraPivot->SetWorldLocationAndRotation(
+		Location, BuildCameraRotation(TargetCameraUp, AimPitchDeg));
 	CurrentCameraUp = CurrentCameraRotation.RotateVector(FVector::UpVector);
 }
 
@@ -324,12 +461,17 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 	{
 		// No input: counter-torque brake so the ball stops quickly instead of
 		// coasting on rolling friction (supported only; air keeps momentum).
+		// 纯反力矩受低摩擦牵引限制(球会空转而线速度停不下来),叠加平面速度
+		// 直接衰减:松键 ~1s 内停稳(重力竖直分量原样保留,不影响掉落)。
 		if (LandingResponse && LandingResponse->IsSupported())
 		{
 			const FVector BrakeUp = -GetActiveGravityDirection();
 			const FVector Velocity = BallCollision->GetPhysicsLinearVelocity();
 			const float NormalSpeed = FVector::DotProduct(Velocity, BrakeUp);
 			FVector Planar = Velocity - BrakeUp * NormalSpeed;
+			Planar *= FMath::Exp(-ReleaseBrakeHz * DeltaSeconds);
+			BallCollision->SetPhysicsLinearVelocity(BrakeUp * NormalSpeed + Planar);
+
 			const float PlanarSpeed = Planar.Size();
 			if (PlanarSpeed > 10.0f)
 			{
@@ -388,11 +530,11 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 
 	if (bSupported)
 	{
-		// Rolling kinematics: torque axis T drives v_center = -wr*(Up x T), so the
-		// axis that rolls toward Desired is (Up x Desired) — the old (Desired x Up)
-		// rolled the ball backwards/mirrored.
-		const FVector TorqueAxis = FVector::CrossProduct(Up, Desired);
-		BallCollision->AddTorqueInRadians(TorqueAxis * RollTorqueAcceleration, NAME_None, true);
+		// Drive: direct planar acceleration (mass-independent). 旧的力矩驱动在低摩擦
+		// 接触下大量打滑(实测 ω·r≈3000 而 |v|≈240),滚动力矩转化不成位移,终端速度
+		// 被切向拖拽死锁在 ~335。平面加速度绕开牵引耦合,终端 = DriveAccel/切向拖拽,
+		// 只作用于 WASD 路径;重力/掉落完全不走这里。
+		BallCollision->AddForce(Desired * DriveAccelerationCm, NAME_None, true);
 	}
 	else if (bAllowAirControl)
 	{
@@ -443,6 +585,12 @@ void AGSRollingBallPawn::PollNativeInput()
 	const float AxisY = (PC->IsInputKeyDown(ForwardKey) ? 1.0f : 0.0f) - (PC->IsInputKeyDown(BackwardKey) ? 1.0f : 0.0f);
 	SetMoveInput(FVector2D(AxisX, AxisY));
 
+	// Debug: hold forward drive every tick (stair-climb camera shake reproduction).
+	if (bDebugAutoDriveForward)
+	{
+		SetMoveInput(FVector2D(0.0f, 1.0f));
+	}
+
 	const bool bFlipDown = PC->IsInputKeyDown(FlipGravityKey);
 	if (bFlipDown && !bFlipKeyWasDown)
 	{
@@ -484,6 +632,21 @@ void AGSRollingBallPawn::PollNativeInput()
 		}
 	}
 	bTrailFartherKeyWasDown = bTrailFartherDown;
+
+	// Player speed keys: each press steps the WASD drive force (O down, P up).
+	const bool bSpeedDownDown = PC->IsInputKeyDown(SpeedDownKey);
+	if (bSpeedDownDown && !bSpeedDownKeyWasDown)
+	{
+		AdjustDriveSpeed(-1.0f);
+	}
+	bSpeedDownKeyWasDown = bSpeedDownDown;
+
+	const bool bSpeedUpDown = PC->IsInputKeyDown(SpeedUpKey);
+	if (bSpeedUpDown && !bSpeedUpKeyWasDown)
+	{
+		AdjustDriveSpeed(1.0f);
+	}
+	bSpeedUpKeyWasDown = bSpeedUpDown;
 
 	// Set-axis keys 1/2/3 snap gravity to the positive direction of that axis.
 	const bool bAxisSetXDown = PC->IsInputKeyDown(AxisSetXKey);
@@ -586,7 +749,17 @@ void AGSRollingBallPawn::SetMoveInput(FVector2D NewMoveInput)
 
 void AGSRollingBallPawn::AddCameraLookInput(float YawDeltaDegrees, float PitchDeltaDegrees)
 {
-	CameraYawDegrees += YawDeltaDegrees;
+	// 航向绕"当前重力上轴"旋转:上轴 ±Z 互换时同一鼠标动作给出的屏幕转向天然一致
+	//(绕 -Z 转 +θ 等价于绕 +Z 转 -θ,恰好抵消旧实现的镜像)。
+	if (!CameraAimHeading.IsNearlyZero() && YawDeltaDegrees != 0.0f)
+	{
+		const FVector Axis = CurrentCameraUp.GetSafeNormal();
+		if (!Axis.IsNearlyZero())
+		{
+			CameraAimHeading = FQuat(Axis, FMath::DegreesToRadians(YawDeltaDegrees))
+				.RotateVector(CameraAimHeading);
+		}
+	}
 	CameraPitchDegrees = FMath::Clamp(CameraPitchDegrees + PitchDeltaDegrees, -MaximumCameraPitchDegrees, MaximumCameraPitchDegrees);
 }
 
@@ -733,6 +906,12 @@ FText AGSRollingBallPawn::GetCurrentInteractionText() const
 	}
 
 	return FText::GetEmpty();
+}
+
+void AGSRollingBallPawn::AdjustDriveSpeed(float Direction)
+{
+	DriveAccelerationCm = FMath::Clamp(
+		DriveAccelerationCm + Direction * DriveAdjustStepCm, DriveMinCm, DriveMaxCm);
 }
 
 void AGSRollingBallPawn::ResetToCheckpoint()

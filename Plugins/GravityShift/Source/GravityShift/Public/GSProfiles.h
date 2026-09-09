@@ -54,7 +54,19 @@ public:
 
 	// Angular acceleration applied as torque (rad/s^2), mass independent.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
-	float RollTorqueAcceleration = 26.0f;
+	float RollTorqueAcceleration = 44.0f;
+
+	// 无输入时的反向制动力矩(rad/s^2):越大停得越快、惯性越小。旧值 60 停车拖沓。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
+	float StopTorqueAcceleration = 160.0f;
+
+	// WASD 平面加速度(cm/s²,质量无关):终端 ≈ 此值/切向拖拽。替代打滑的滚动力矩驱动。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
+	float DriveAccelerationCm = 400.0f;
+
+	// 松键刹车平面衰减率(Hz):~3 = 1 秒停稳。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
+	float ReleaseBrakeHz = 3.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
 	float MaximumPlanarSpeedCm = 1600.0f;
@@ -86,8 +98,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0"))
 	float MaximumCameraPitchDegrees = 70.0f;
 
+	// 无导轨相机滚转锁世界竖直(与导轨相机一致):G 翻转只平移跟球、画面不颠倒(防晕 3D)。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera")
-	bool bCameraFlipsWithGravity = true;
+	bool bCameraFlipsWithGravity = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Gravity")
 	float GravityScale = 1.0f;

@@ -51,7 +51,7 @@
 ## 输入模拟(pawn)
 
 - `SetMoveInput(Vector2D)` 是 BlueprintCallable 可脚本驱动,但 **`PollNativeInput` 每 tick 用键盘实况覆盖 MoveInput**——脚本验证前必须 `ball.set_editor_property('enable_native_polling_input', False)`,测完恢复 True
-- `move_input` 字段**不反射**,只能设不能读;Vector2D 用 `unreal.Vector2D(x, y)`(Y=前)
+- `move_input` **不反射到 set_editor_property**(2026-09-08 实测:`set_editor_property('move_input', ...)` 直接抛 "Failed to find property")——必须调方法 `ball.set_move_input(unreal.Vector2D(0, 1))`;Vector2D(x, y) Y=前
 - 验证方向:相机前向投影到支撑面 → `dot(velocity, fwd)` 正=W 正确;`up.cross(fwd)` 为右,A 应得负点积
 
 ## 存盘
@@ -62,3 +62,20 @@
 
 - **Python 类名没有 A/U 前缀**:`AGSKey`/`AGSPickupItem`/`AGSDoor` 在 unreal 模块里是 `unreal.GSKey`/`unreal.GSPickupItem`/`unreal.GSDoor`;`hasattr(unreal,'AGSKey')` 恒 False、`getattr` 返回 None,别误判成"类没编译进去"。断言新类用去前缀名
 - **BlueprintPure 函数 ≠ 属性**:`IsMessageLocked()` 这类 BlueprintPure 要方法调用 `ball.is_message_locked()`,`get_editor_property('is_message_locked')` 抛 "Failed to find property"。判据:UFUNCTION 标 BlueprintPure 的用括号,UPROPERTY 的用 get/set_editor_property
+
+
+## CDO/调试标记的坑(2026-09-08 实踩)
+
+- **改 CDO 不会传给 PIE 实例**:`unreal.get_default_object(unreal.XXX)` 写入属性后,CDO 读回 True,但 PIE 新生成的实例读到 False(原因未查明,两处 CDO 都试过)。实用规则:想让 PIE 里的开关立即生效,把它做成 **Tick 逐帧读**的属性,PIE 里直接 `ball.set_editor_property(...)` 改实例;BeginPlay 一次性消费的属性没法运行时翻
+- `SceneComponent.set_using_absolute_location` **没暴露给 Python**——不能运行时翻转,只能编译期/BeginPlay 决定
+- **没有全局 `unreal.load_blueprint_class`**,要用 `unreal.EditorAssetLibrary.load_blueprint_class("/路径/资产名")`
+- 改 CDO 会把 BP 资产弄脏,autosave 会把调试默认值写进 .uasset → 本次 BP_GSRollingBallPawn.uasset 差点带着调试标记混进提交(amend 才摘掉)。**commit 前 `git status --short` 审查:凡是你没打算改的 .uasset/.umap 出现,一律 `git checkout <干净提交> -- <文件>` 恢复再提交**
+- `EditorAssetLibrary.reload_asset` 不存在;防再污染靠"改完立即复位 CDO 标记 + git 审查"
+
+## 2026-09-08 手感/校准轮新坑
+
+- **`EditorAssetLibrary.load_asset(路径)` 可能返回 None 而 `unreal.load_object(None, '路径.对象名')` 能拿到**——新启动的编辑器资产注册表未扫描完。DataAsset 等加载不进来时改用 load_object(全名带 `.对象名` 后缀)
+- **改 DataAsset 属性后不会自动标脏**:set_editor_property 之后用 `EditorLoadingAndSavingUtils.save_dirty_packages(True, True)` 落盘,并用**磁盘 mtime 对比当前时间**确认真的写了(假拒的判据)。`save_loaded_asset`/`mark_package_dirty` 均不存在
+- **PIE 游戏世界里 `EditorActorSubsystem.spawn_actor_from_class` 返回 None**(只在编辑器世界可用);`GameplayStatics.begin_spawning_actor_from_class` 没暴露。临时测试台的正确做法:**PIE 启动前在编辑器世界摆好**(PIE 会复制),或先 end_play 在编辑器世界摆好再开 PIE
+- `SceneComponent` 读世界位置用 `get_world_location()`(没有 get_actor_location);`PlayerController.get_viewport_size()` **不收参数**、直接返回 (宽, 高) 元组
+- UE 深度后台节流会污染"终端速度"类读数:采样间隔按真实时间算不准游戏时间——**标定读数一律用位置+速度联合探针**(位置位移/速度对照),单看速度全是噪声

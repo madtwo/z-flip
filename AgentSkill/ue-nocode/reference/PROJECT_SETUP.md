@@ -54,7 +54,7 @@
 
 ## 当前项目版图(2026-09-02)
 
-- **主线:`D:\UE` 下的 z-flip**(2026-09-05 已同步至 v7:六方向重力+导轨相机+落地三带网格联动+拾取/钥匙/门,dll 已重编 PIE 实测;GitHub madtwo/z-flip public,REST 直传;仓库内 AgentSkill/gs-block-assembly/SKILL.md = 给关卡侧 AI 的积木拼装 skill;详见其 HANDOVER_zflip.md §8-§15)
+- **主线:`D:\UE` 下的 z-flip**(2026-09-08 已同步至 v7:六方向重力+导轨相机+落地三带网格联动+拾取/钥匙/门+相机抖动修复(§17 枢轴绝对定位),dll 已重编 PIE 实测;GitHub madtwo/z-flip public,REST 直传;仓库内 AgentSkill/gs-block-assembly/SKILL.md = 给关卡侧 AI 的积木拼装 skill;详见其 HANDOVER_zflip.md §8-§15)
 - `D:\UE\MyProject2`:v2 六向已验收基线,已 pivot 停更(工作区有 v5 半成品残留,勿在其上开发)
 - `D:\UE\我的项目2`:原版参考/回退,勿动
 - 参考包:`D:\下载\GravityShift_ZFlip_RollingBall_DocumentPack_v5`(v5 文档规范)、`D:\下载\GravityShift_UE582_RuntimePack_v6_RC1`(GPT 写的运行时包,未编译过,仅参照)

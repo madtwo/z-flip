@@ -12,6 +12,7 @@
 ## 就绪标准与启动
 
 - 以 `netstat -ano | grep ":8000" | grep LISTENING` 为就绪标准;tasklist grep 在启动期间会误报"进程消失"(踩过两次)
+- **QUIT_EDITOR 会残留"项目浏览器"进程**:关掉项目后 UnrealEditor.exe 可能还挂着(窗口标题"虚幻引擎5.8",没加载项目)。下次 `start` uproject 就会出现**双编辑器进程**——端口/编辑器状态全乱。启动前 `tasklist | grep -ci UnrealEditor` 查数量,>1 时用 PowerShell 看 MainWindowTitle 分辨(浏览器进程没项目名,真编辑器标题含项目名如"z-flip - 虚幻编辑器"),按 PID+标题杀浏览器那个,别盲杀
 - `bAutoStartServer=True` **不保证自启**(复制项目/新项目首次启动经常不起,原因未查清)。没起就兜底拉起:
   ```bash
   python ue_pyexec.py "import unreal; unreal.SystemLibrary.execute_console_command(None, 'ModelContextProtocol.StartServer')"

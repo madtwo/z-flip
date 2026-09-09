@@ -201,7 +201,7 @@ void AGSGravityHUD::DrawHUD()
 
 	if (bShowControls)
 	{
-		Lines.Add(TEXT("WASD roll  |  G flip  |  1/2/3 set X/Y/Z  |  Q/E camera dist  |  F interact  |  R reset"));
+		Lines.Add(TEXT("WASD roll  |  G flip  |  1/2/3 set X/Y/Z  |  Q/E camera dist  |  O/P speed  |  F interact  |  R reset"));
 	}
 
 	float Y = StartPosition.Y;
