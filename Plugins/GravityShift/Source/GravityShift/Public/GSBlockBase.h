@@ -89,6 +89,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "GravityShift")
 	void SetAffectedByGravity(bool bAffected);
 
+	// 清零线速度 + 角速度。配合 SetAffectedByGravity(false) 把方块"瞬间定住",而不是
+	// 保留速度继续滑行。方块仍在模拟物理——重新启用重力后立刻恢复响应。
+	UFUNCTION(BlueprintCallable, Category = "GravityShift")
+	void FreezeMotion();
+
 	UFUNCTION(BlueprintCallable, Category = "GravityShift")
 	void SetCanBreakTargets(bool bCanBreak);
 

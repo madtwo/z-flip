@@ -2,7 +2,7 @@
 协议: 组播 239.0.0.1:6766 发 open_connection -> 编辑器反向连到本机 TCP -> 发 command -> 收 command_result。
 用法: python ue_pyexec.py "import unreal; print('hi')" [--port 16901]
 """
-import socket, json, sys, argparse, threading, time
+import os, socket, json, sys, argparse, tempfile, threading, time
 
 MCAST_GRP = '239.0.0.1'
 MCAST_PORT = 6766
@@ -16,7 +16,7 @@ def msg(t, data=None, dest=''):
 def run(code, cmd_port, timeout=60):
     out = {'done': False}
     if '\n' in code or len(code) > 300:
-        path = rf'C:\Users\20625\AppData\Local\Temp\ue_pyexec_{int(time.time()*1000)%100000000}.py'
+        path = os.path.join(tempfile.gettempdir(), f'ue_pyexec_{int(time.time()*1000)%100000000}.py')
         open(path, 'w', encoding='utf-8').write(code)
         payload = {'command': path, 'unattended': True, 'exec_mode': 'ExecuteFile'}
     else:

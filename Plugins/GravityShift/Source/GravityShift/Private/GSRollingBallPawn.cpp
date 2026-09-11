@@ -780,7 +780,10 @@ void AGSRollingBallPawn::PollNativeInput()
 	{
 		if (!FMath::IsNearlyZero(MouseX) || !FMath::IsNearlyZero(MouseY))
 		{
-			AddCameraLookInput(MouseX * CameraYawDegreesPerMouseUnit, -MouseY * CameraPitchDegreesPerMouseUnit);
+			// Pitch 不取反:BuildCameraRotation 里 CameraPitchDegrees 是正值=抬头,
+			// 而 UE 的鼠标 delta Y 上抬为正,所以直接把 MouseY 加进去就是"鼠标上抬
+			// → 相机上抬"。旧实现的 -MouseY 让俯仰和偏航反号,只有上下是反的。
+			AddCameraLookInput(MouseX * CameraYawDegreesPerMouseUnit, MouseY * CameraPitchDegreesPerMouseUnit);
 		}
 	}
 

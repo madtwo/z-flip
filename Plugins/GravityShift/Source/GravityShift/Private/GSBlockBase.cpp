@@ -119,6 +119,17 @@ void AGSBlockBase::SetAffectedByGravity(bool bAffected)
 	}
 }
 
+void AGSBlockBase::FreezeMotion()
+{
+	if (!Mesh)
+	{
+		return;
+	}
+
+	Mesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
+	Mesh->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+}
+
 void AGSBlockBase::SetCanBreakTargets(bool bCanBreak)
 {
 	bCanBreakTargets = bCanBreak;

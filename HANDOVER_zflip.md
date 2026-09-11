@@ -5,6 +5,7 @@
 > **§13 = 2026-09-04 第七轮交付：障碍物物理砸碎修复(根因 tick 自检+PIE 15369J)+ 玩家球落地三带网格联动(≤4格安静/5-6格反弹/≥7格反重力,弹回4格)**,均 Live Coding+PIE 验证通过;实机手感 & 前台 7格边界验收待用户
 > **§14 = 2026-09-04 第八轮交付：拾取物品 + 拾取钥匙开门(F 交互/拾取锁屏消息空格继续/门按 RequiredKeyID 配对/滑开动画/死亡重置回锁复位)**,UBT 编译通过 + PIE 全用例验收(18/18 断言 + 滑门开/关时序);详见 §14,剩一处已知滑门落座偏差见 §14.6
 > **§15 = 2026-09-05 第九轮交付：§13/§14 拉取同步本机+重编 + 「积木式」对接文档(README 功能积木清单 / USAGE_WHITEBOX 文件存放规范+拾取钥匙门手册),手册摆法已实机 PIE 走通**;关卡策划对接入口 = README「功能积木清单」→ USAGE_WHITEBOX
+> **§25 = 2026-09-11 第十七轮交付：相机俯仰反转修复(鼠标上抬→相机上抬)+ 重力区域检测器系统(检测器/区域管理器两个新类,"禁用重力"= 停重力+清速度瞬间定住)**,UBT 编译通过 + PIE 7/7 全过;关卡侧拼装手册见 `AgentSkill/gs-gravity-zone-assembly/SKILL.md`,遗留:两个 Zone 数组按需求留空待后续 AI 按空间位置填
 > 写这份文档的目的：先把做到哪、卡在哪、改了什么、踩了什么雷同步清楚，供人工诊断。
 
 ---
@@ -805,3 +806,74 @@ Manager 由 GameMode BeginPlay 自动 spawn,BeginPlay **可能延迟到下一 ti
   | 3r 反向(天花板 → -Y 墙) | 触发,+Z→-Y,落墙下滑 ✓ |
 - **测试脚本坑(本轮踩到)**:`_tmp_drive.py`(持续驱动用)在上一轮收尾时被 `rm -f _tmp_*` 清掉,导致后续几轮"球没被驱动、正常用例没触发",差点误判成代码回归。**测试脚本要单独放一个目录别混在临时清理里**。
 - **当前参数**(四实例已保存):minV=20、lip=60、normalDot=0.7、align=0.35、slow=100、touch=20、path=260、cooldown=0.3、debug_log=False。
+
+---
+
+## 25. 2026-09-11 第十七轮:相机俯仰反转修复 + 重力区域检测器系统(编译通过 + PIE 7/7 全过 ✅)
+
+**交付物**:`GSGravityZones.h/.cpp`(两个新类)+ `GSRollingBallPawn.cpp` 一行符号修正。UBT 编译通过,无 warning。
+
+### 25.1 相机俯仰反向(已修,待 PIE 验收)
+
+- **用户反馈**:鼠标向上 → 摄像机向下,上下反了。
+- **根因**:`GSRollingBallPawn.cpp:786` 调用点写的是 `AddCameraLookInput(MouseX * YawPerUnit, -MouseY * PitchPerUnit)` —— **只有 Pitch 取了负号,Yaw 没有**。符号链:UE 鼠标 delta Y 上抬为正 → `-MouseY` 为负 → `CameraPitchDegrees` 变小;而 `BuildCameraRotation`(`:443`,其中 `:467` 是 `PitchQuat = FQuat(Right, radians(-TotalPitch))`)里推导得 **`CameraPitchDegrees` 为正 = 抬头**。于是负增量 = 低头,与上抬鼠标相反。
+- **修复**:去掉那个负号(调用点,不是函数内部)。
+- **为什么改调用点而不是 `AddCameraLookInput` 内部**:①该函数只有一个调用点,两处等价;②它是 `UFUNCTION(BlueprintCallable)`,在函数内取反会让蓝图/未来调用方传正值得到"低头",把反号藏进 API 语义里。改调用点是一字之差,且 Yaw/Pitch 在那里恢复对称。
+- **注意**:`AddCameraLookInput` 只在**非导轨相机**时被调用(`:779` 的 `if (!RailCamera || !RailCamera->IsDriving())`)。导轨关卡里鼠标俯仰本来就不生效——若在导轨关验收不到变化,是这条守卫,不是修复没生效。
+
+### 25.2 重力区域检测器(新功能,编译通过 + PIE 7/7 全过)
+
+- **设计**:全场方块平时不受重力;球穿过门口检测器 → 全图禁用 + 只激活球**要去的那个区域**。检测器双向:朝前向穿过激活 `ZoneB_Blocks`,反向激活 `ZoneA_Blocks`。
+- **两个新类**(`Public/GSGravityZones.h`):
+  - `AGSGravityZoneManager` —— `SetActiveZone/DisableAllGravity/ResetAllZones/OnResetWorld/FindZoneManager`。`SetActiveZone` = 全图 `SetAffectedByGravity(false)` 后逐个打开传入列表。
+  - `AGSGravityDetector` —— `UBoxComponent TriggerPlane`(Trigger profile,10cm 厚半尺寸 5)+ `UStaticMeshComponent FlashMesh`(编辑器可见/游戏隐身,触发亮 `FlashDuration` 秒)。触发门:速度 ≥ `MinTriggerSpeed`(50) ∧ `|dot(速度,前向)| ≥ MinDirectionalDot`(0.2)。
+- **复用现有接口,核心逻辑零改动**:走的是已有的 `AGSBlockBase::SetAffectedByGravity`(`GSBlockBase.cpp:113`,内部即 `GravityBody->SetGravityEnabled`),没碰 `AGSBlockBase`/`AGSGravityManager`/`AGSRollingBallPawn` 的核心。
+- **两个实现坑(都是顺序/类型问题,已解)**:
+  1. **UHT 不收 `TObjectPtr` 当 UFUNCTION 参数** → `SetActiveZone` 参数和两个 Zone 数组用裸 `TArray<AGSBlockBase*>`(UHT 报 `UFunctions cannot take a TObjectPtr as a function parameter`)。
+  2. **Actor BeginPlay 顺序不保证** → 管理器的"开局禁用"若在 `BeginPlay` 里立即执行,会被**后跑的方块 BeginPlay** 用它序列化的 `bAffectedByGravity` 顶掉(`GSBlockBase::BeginPlay` → `ApplyCurrentConfiguration` → `GravityBody->bGravityEnabled = bAffectedByGravity`)。改为 `SetTimerForNextTick` 延一帧,在所有 BeginPlay 之后执行。**与 §11 的"关卡 Actor BeginPlay 早于 GameMode 生成 Manager"是同一类顺序坑**。
+- **行为边界**:最初的实现里"禁用重力"= 停止**施加**重力,方块会保留速度继续滑行。**该行为已在 §25.4 改为"瞬间定住"**——现在禁用 = 停重力 + 清零线/角速度。
+- **前置条件(没做就看不到效果)**:关卡里必须放 1 个 `AGSGravityZoneManager`(不自动 spawn);方块必须勾 `Simulating Physics`,否则物理上根本不动。`AGSGravityDetector` 找不到管理器时**只闪灯**并打 Warning。
+- **待办**:两个 Zone 数组**按需求留空**,由后续 AI 按空间位置批量填(约定见 `AgentSkill/gs-gravity-zone-assembly/SKILL.md` §5);与 `AGSWorldStateManager::ResetWorld` 的联动**未接线**(`OnResetWorld` 已留,等价 `ResetAllZones`)。
+
+### 25.3 交接文档
+
+- 新增 `AgentSkill/gs-gravity-zone-assembly/SKILL.md`:机制、前置条件(管理器/Simulating Physics/延一帧)、参数表、**已实跑的 7 条 PIE 结果**、后续 AI 填数组的空间判定约定。
+
+### 25.4 禁用重力改为"瞬间定住" + 7 条 PIE 用例实跑
+
+- **需求**:`SetAffectedByGravity(false)` 原本只停施力,已在下落的方块会带着速度滑行。改为禁用时**同时清零速度**,瞬间定住。
+- **改动(3 处)**:
+  1. `GSBlockBase.h/.cpp` —— 新增 `FreezeMotion()`(`BlueprintCallable`):对 `Mesh` 调 `SetPhysicsLinearVelocity(ZeroVector)` + `SetPhysicsAngularVelocityInDegrees(ZeroVector)`。
+  2. `GSGravityZones.cpp` —— 新增私有静态 `AGSGravityZoneManager::DisableBlockGravity(AGSBlockBase*)` = `SetAffectedByGravity(false)` + `FreezeMotion()`。**所有"禁用"路径都收敛到这一个函数**,`DisableAllGravity()` 和 `SetActiveZone()` 都调它,不在多处各写一遍。
+  3. `AGSGravityZoneManager::SetActiveZone` —— 由"先全图禁用再启用传入列表"改成**单次遍历**:先把传入列表收成 `TSet` 跳过,其余才禁用。否则正要激活的那批方块会被先冻一瞬,球在同一扇门前反复穿时区域方块会一顿一顿。
+- **`AGSBlockBase` 核心逻辑未动**:只在类上加了一个新方法,`SetAffectedByGravity` / `AGSGravityManager` / `AGSRollingBallPawn` 核心零改动(相机那行除外,见 25.1)。
+- **PIE 实测(2026-09-11,临时关卡 `_TempGravZone`,4 方块 + 1 管理器 + 1 检测器,已删除,`测试案例.umap` 未被污染)7/7 全过**:
+  - 基线 4 方块全 `grav=False`、`z=300`、`|v|=0`;朝 +X 穿过 → ZoneB 转 `grav=True` 落至 `z=50`,ZoneA 不动。
+  - 反向 −X → ZoneA 转 `grav=True` 下落,ZoneB 转 `grav=False`。
+  - **侧向(dot≈0)不触发**:触发盒临时加宽到 (300,200,200) 保证球必然穿过,球 x 全程 ≈ −2、y 从 −1200 穿到 +844.8(y=149.3 时正在盒内、速度纯 +Y),全程不闪光不切区域 → 是 `MinDirectionalDot` 拦下的,不是"没撞上"。
+  - 闪光:`flash_duration` 临时调 60s,触发后 `hidden_in_game` 由 True 变 False 并持续亮,跨两次读取成立。
+  - **瞬间定住(关键项)**:ZoneB 正以 3052cm/s 下落(`z=7627`)时反向触发 → 立刻读到 `|v|=0.0`、`z=7017.0`;约 2s 游戏时间后再读 `z` **仍精确等于 7017.0** → 真冻住,不是滑行。
+  - 同一时刻只有一个区域激活;`reset_all_zones()` → 4 方块全 `grav=False` 且 `|v|=0`,`reset_detector()` → 闪光重新隐身。
+  - 额外确认:被冻住的方块重新激活后正常恢复下落(7017→6967→6193),"重新启用不需额外处理"成立。
+- **遗留**:闪光只验证了显隐翻转,自定义发光材质的观感未验(材质由关卡/美术配)。
+- **测试方法备忘**:PIE 阶段用 `unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()` 拿**游戏世界**;结束 PIE 是 `LevelEditorSubsystem.editor_request_end_play()`(**没有** `editor_end_play`;`end_play` 与 `load_level` 必须分两个脚本发,同脚本会死锁);相机偏航 `add_camera_look_input(delta, 0)` 是**相对量且方向为 +X→+Y→−X→−Y**,别假设一次 +90 就到 +Y。
+
+### 25.5 本轮交付清单
+
+| 文件 | 状态 | 内容 |
+|---|---|---|
+| `Public/GSGravityZones.h` / `Private/GSGravityZones.cpp` | **新增** | `AGSGravityZoneManager` + `AGSGravityDetector` 两个类(SKILL 手册所述的积木) |
+| `Public/GSBlockBase.h` / `Private/GSBlockBase.cpp` | 改 | +`FreezeMotion()`(清线/角速度),其余零改动 |
+| `Private/GSRollingBallPawn.cpp` | 改 | 相机 Pitch 去掉 `-MouseY` 的负号(1 行);核心逻辑未动 |
+| `AgentSkill/gs-gravity-zone-assembly/SKILL.md` | 新增 | 关卡侧拼装手册:机制/朝向约定/前置条件/参数表/实测结果/后续填数组约定 |
+| `README.md` | 改 | 功能积木清单 + 文档地图各一行 |
+| `AgentSkill/ue-nocode/reference/ue_pyexec.py` | 改 | 修 bug:临时脚本路径原本硬编码队友机器的 `C:\Users\20625\...`,改 `tempfile.gettempdir()` |
+
+**未动**:`AGSGravityManager`、`AGSRollingBallPawn` 的重力/移动核心、任何 umap。
+
+### 25.6 后续待办
+
+1. **两个 Zone 数组填引用**(`ZoneA_Blocks` / `ZoneB_Blocks`)**本轮按需求不做**——只留了数组接口,由后续 AI 按空间位置批量填,规则见 SKILL §5;填完**必须存盘**,数组是实例数据。
+2. **与 `AGSWorldStateManager::ResetWorld` 接线**——`OnResetWorld()` 已留桩(等价 `ResetAllZones()`),尚未挂进死亡重置流程。
+3. **闪光材质**——目前只有显隐翻转,自发光观感待关卡/美术配。
+4. **相机俯仰修复的实机验收**——PIE 逻辑已验证,用户手感验收待做(注意导轨相机下俯仰本就不生效,见 25.1)。
