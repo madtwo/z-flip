@@ -9,6 +9,7 @@
 #include "GSGravityBodyComponent.h"
 #include "GSGravityManager.h"
 #include "GSProfiles.h"
+#include "GSRollingBallPawn.h"
 
 UGSLandingResponseComponent::UGSLandingResponseComponent()
 {
@@ -219,6 +220,21 @@ void UGSLandingResponseComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	const float FallSpeed = FVector::DotProduct(Velocity, Dir);
 
 	const bool bSupported = ProbeGround();
+
+	// 转向器滑行期间重力方向正在旋转:落地响应/自动反转全部让位(半路弹跳或反转会把
+	// 球从滑梯上扯下来)。清掉坠落累计,避免滑出瞬间被旧数据误判。
+	if (const AGSRollingBallPawn* RedirectBall = Cast<AGSRollingBallPawn>(GetOwner()))
+	{
+		if (RedirectBall->IsGravityRedirecting())
+		{
+			AirborneSeconds = 0.0f;
+			CurrentFallSpeedCm = 0.0f;
+			CurrentFallDistanceCm = 0.0f;
+			bReverseConsumedThisFlight = false;
+			bWasSupported = bSupported;
+			return;
+		}
+	}
 
 	if (bSupported)
 	{

@@ -118,7 +118,17 @@ void UGSGravityBodyComponent::SetGravityEnabled(bool bEnabled)
 
 FVector UGSGravityBodyComponent::GetGravityDirection() const
 {
+	// 转向器过渡优先:覆盖方向是"正在旋转的重力",与 Pawn 的相机/驱动同源。
+	if (!GravityDirectionOverride.IsNearlyZero())
+	{
+		return GravityDirectionOverride.GetSafeNormal();
+	}
 	return GravityManager ? GravityManager->GetGravityDirection() : FVector(0.0, 0.0, -1.0);
+}
+
+void UGSGravityBodyComponent::SetGravityDirectionOverride(FVector NewDirection)
+{
+	GravityDirectionOverride = NewDirection.GetSafeNormal();
 }
 
 FVector UGSGravityBodyComponent::GetLinearVelocity() const

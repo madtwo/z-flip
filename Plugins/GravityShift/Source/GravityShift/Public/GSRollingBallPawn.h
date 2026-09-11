@@ -125,6 +125,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Debug")
 	bool bDebugAutoDriveForward = false;
 
+	// Debug: 转向器滑行逐帧日志(球位/实际速度/指令速度/接触法线/旋转进度)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Debug")
+	bool bRedirectDebugLog = false;
+
 	// Interact moved from E to F: E is now the camera-distance key (Q/E).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
 	FKey InteractKey = EKeys::F;
@@ -281,6 +285,35 @@ public:
 	UFUNCTION(BlueprintPure, Category = "GravityShift")
 	EGSGravityDirection GetCurrentGravityDirection() const;
 
+	// 当前生效的重力方向(单位向量)。转向器过渡期间返回过渡中的中间方向(≠管理器方向),
+	// 相机的"支撑上"、驱动平面、物理重力全部读这一个源,滑行全程连续不跳变。
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
+	FVector GetActiveGravityDirection() const;
+
+	// ---- 转向器:定向重力过渡 + 沿弯道滑行 ------------------------------------
+	// 球碰到转向器后由本状态机接管:重力方向沿弯道平滑旋转(按滑行距离推进,球滚得
+	// 快转得快,不会"球还在坡上重力已转完"),期间速度锁在弯道当前切向(球被重力压在
+	// 滑梯面上滑过去),玩家输入被抑制。旋转走完提交管理器;滑行持续到球离开滑梯
+	// (由转向器调 EndGravityRedirect 释放)。
+	//   TargetGravityDirection 滑出后的重力方向(连接面的"下")
+	//   RideSpeedCm             滑行速度
+	//   BendAxis                弯道旋转轴(≈ 转向器网格挤出方向)
+	//   RidePathLengthCm        滑过多少厘米完成重力旋转
+	UFUNCTION(BlueprintCallable, Category = "GravityShift")
+	void BeginGravityRedirect(FVector TargetGravityDirection, float RideSpeedCm, FVector BendAxis, float RidePathLengthCm);
+
+	// 释放滑行(球已离开滑梯):若旋转尚未走完则补完并提交,然后交回玩家控制。
+	UFUNCTION(BlueprintCallable, Category = "GravityShift")
+	void EndGravityRedirect();
+
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
+	bool IsGravityRedirecting() const { return bGravityRedirectActive; }
+
+	// 转向器滑行进度(0..1):按"实际滑行距离 / RidePathLengthCm"推进,1 = 重力旋转已走完
+	// (未在滑行时返回 1)。转向器用它在释放前确认旋转已走完,避免留下半途的重力。
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
+	float GetGravityRedirectProgress() const;
+
 	// Transient "X axis unavailable" feedback (driven by 1/2/3 on disallowed axes).
 	UFUNCTION(BlueprintPure, Category = "GravityShift")
 	bool IsAxisHintActive() const;
@@ -298,6 +331,24 @@ public:
 
 	// 探针"连续无命中"计时:命中立即收短、连续无命中 0.25s 才放长(去弹翻转)。
 	float ProbeClearSeconds = 0.0f;
+
+	// ---- 转向器过渡状态(瞬时,非反射) ----
+	bool bGravityRedirectActive = false;
+	bool bGravityRedirectRotationCommitted = false;
+	FVector GravityRedirectFrom = FVector(0.0, 0.0, -1.0);
+	FVector GravityRedirectTo = FVector(0.0, 0.0, -1.0);
+	FVector GravityRedirectCurrent = FVector(0.0, 0.0, -1.0);
+	FVector GravityRedirectAxis = FVector(1.0, 0.0, 0.0);
+	float GravityRedirectSpeed = 700.0f;
+	float GravityRedirectPathLength = 320.0f;
+	float GravityRedirectPathCm = 0.0f;
+	float GravityRedirectHoldElapsed = 0.0f;
+	// 贴面吸附:探针长度 = 球半径 + 该值;法向吸附速度 = 空隙 × 该增益(限速,不瞬移)。
+	float SurfaceFollowRangeCm = 120.0f;
+	float SurfaceFollowGain = 6.0f;
+	// 保险上限:球卡住/组件异常没释放时也不会永久夺走控制。
+	float GravityRedirectMaxSeconds = 5.0f;
+	void UpdateGravityRedirect(float DeltaSeconds);
 
 	UFUNCTION(BlueprintPure, Category = "GravityShift")
 	FString GetAxisHintText() const;
@@ -386,9 +437,7 @@ protected:
 	float AxisHintExpireTime = -1.0f;
 	FString AxisHintText;
 
-	FVector GetActiveGravityDirection() const;
 	FQuat BuildCameraRotation(const FVector& UpVector, float AdditionalPitchDegrees = 0.0f) const;
-
 	// 世界航向(单位向量):无导轨相机的水平瞄准方向。鼠标转向绕当前重力上轴旋转它,
 	// G 翻转(上轴 ±Z 互换)不改变航向 → 视角翻转后仍对准同一个世界方向。
 	FVector CameraAimHeading = FVector::ForwardVector;

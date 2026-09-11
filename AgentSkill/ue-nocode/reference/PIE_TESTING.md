@@ -105,3 +105,10 @@ pawn  = unreal.GameplayStatics.get_player_pawn(w, 0)
 - 临时校准/测试台:一次性关卡(new_level)最干净,用完删;**校准地板要厚**(≤50cm 薄板会被高速球穿透,球一穿数据全污染——用 ≥500cm 厚板或保证顶面平稳)。
 - 判断"卡死还是慢":日志尾部还在出帧 → 慢;停在某行不动 + 双通道超时 + 窗口激活失败 → 死锁,别反复重试,先看有没有未保存内容(编辑器右下角"所有已保存"),能杀就杀。
 - 相关:用户可能**正在玩**(日志里会有 `[GravityShift] dir=...` 等游玩痕迹),动手切图/摆件前先扫一眼日志尾部有没有 PIE 活动。
+- **脚本"注入"的值也活不过恢复帧**:远程执行恢复的那一帧 dt 异常大,`ApplyMovement` 的松键刹车 `Planar *= exp(-3·dt)` 会把刚设的速度一次抹平(实测 `set_ball_linear_velocity(900)` → 第一个 tick 后只剩 15cm/s,球几乎没动,白排查一轮)。产线代码的 dt 钳位只保护平滑/积分,**减速/阻尼类公式同样要钳**;测运动别注入速度,用**游戏内驱动**(`bDebugAutoDriveForward` 调试开关;或 `enable_native_polling_input=False` + `set_move_input`,后者适合"墙上 A/D 爬升"这类自动驱动给不了的方向)——它们每 tick 从游戏侧施力,不受暂停帧影响。
+
+## 测"运动状态"的两个隐蔽坑(2026-09-11 转向器双向轮实踩,接着上一条)
+
+- **游戏内驱动会把注入速度"改向"**:用 `bDebugAutoDriveForward` 抵消松键刹车后,若驱动的方向与注入速度不同向,恢复帧的巨大 dt 会把速度直接盖成驱动方向——现象是"明明球就在触发盒里、速度也给了,就是不触发"(进入判定按方向判定)。对策:测"靠注入速度进入"的用例时把 `DriveAccelerationCm` 调低(100),让驱动只当"防刹车"用;测"靠驱动进入"的用例才需要大驱动力。
+- **相机航向是 Pawn 实例的残留状态**:自动驱动的方向 = 相机前向在支撑面上的投影,而航向在 PIE 会话里跨多次脚本累加(每次 `add_camera_look_input` 都是相对量)→ 同一会话里连续测多个方向会跑偏。对策:按**绝对角度**重设——读 `pawn.get_editor_property('camera_pivot').get_forward_vector()` 的水平分量反推当前航向角,再 `add_camera_look_input(目标角−当前角)`;或者每个方向用例重启一次 PIE。
+- **顺带:CDO 写入被引擎安全层拦**(`Blocked unsafe Python code: get_default_object() modification`)——调试开关只能在**实例**上 `set_editor_property`;这也解释了更早"改了 CDO、PIE 新实例读不到"的谜团(写入根本没生效)。

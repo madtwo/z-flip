@@ -64,9 +64,10 @@
 - **BlueprintPure 函数 ≠ 属性**:`IsMessageLocked()` 这类 BlueprintPure 要方法调用 `ball.is_message_locked()`,`get_editor_property('is_message_locked')` 抛 "Failed to find property"。判据:UFUNCTION 标 BlueprintPure 的用括号,UPROPERTY 的用 get/set_editor_property
 
 
-## CDO/调试标记的坑(2026-09-08 实踩)
+## CDO/调试标记的坑(2026-09-08 实踩,2026-09-11 补根因)
 
-- **改 CDO 不会传给 PIE 实例**:`unreal.get_default_object(unreal.XXX)` 写入属性后,CDO 读回 True,但 PIE 新生成的实例读到 False(原因未查明,两处 CDO 都试过)。实用规则:想让 PIE 里的开关立即生效,把它做成 **Tick 逐帧读**的属性,PIE 里直接 `ball.set_editor_property(...)` 改实例;BeginPlay 一次性消费的属性没法运行时翻
+- **改 CDO 不会传给 PIE 实例(根因已查明:引擎安全层直接拒绝 Python 写 CDO)**:`get_default_object()` 赋值报 `Blocked unsafe Python code: get_default_object() modification. Modifying Class Default Objects (CDOs) from Python causes crashes.`(本机 2026-09-11 实测)。这也解释了更早一轮「CDO 读回 True 但 PIE 实例读到 False」的谜团——写入根本没生效。调试开关一律在**实例**上 set_editor_property;想要「PIE 里能翻」的开关就做成 Tick 逐帧读的属性
+:`unreal.get_default_object(unreal.XXX)` 写入属性后,CDO 读回 True,但 PIE 新生成的实例读到 False(原因未查明,两处 CDO 都试过)。实用规则:想让 PIE 里的开关立即生效,把它做成 **Tick 逐帧读**的属性,PIE 里直接 `ball.set_editor_property(...)` 改实例;BeginPlay 一次性消费的属性没法运行时翻
 - `SceneComponent.set_using_absolute_location` **没暴露给 Python**——不能运行时翻转,只能编译期/BeginPlay 决定
 - **没有全局 `unreal.load_blueprint_class`**,要用 `unreal.EditorAssetLibrary.load_blueprint_class("/路径/资产名")`
 - 改 CDO 会把 BP 资产弄脏,autosave 会把调试默认值写进 .uasset → 本次 BP_GSRollingBallPawn.uasset 差点带着调试标记混进提交(amend 才摘掉)。**commit 前 `git status --short` 审查:凡是你没打算改的 .uasset/.umap 出现,一律 `git checkout <干净提交> -- <文件>` 恢复再提交**
@@ -79,3 +80,20 @@
 - **PIE 游戏世界里 `EditorActorSubsystem.spawn_actor_from_class` 返回 None**(只在编辑器世界可用);`GameplayStatics.begin_spawning_actor_from_class` 没暴露。临时测试台的正确做法:**PIE 启动前在编辑器世界摆好**(PIE 会复制),或先 end_play 在编辑器世界摆好再开 PIE
 - `SceneComponent` 读世界位置用 `get_world_location()`(没有 get_actor_location);`PlayerController.get_viewport_size()` **不收参数**、直接返回 (宽, 高) 元组
 - UE 深度后台节流会污染"终端速度"类读数:采样间隔按真实时间算不准游戏时间——**标定读数一律用位置+速度联合探针**(位置位移/速度对照),单看速度全是噪声
+
+## 给已有关卡 Actor 挂组件 / 形状探针(2026-09-11 转向器轮)
+
+- `Actor.add_component_by_class` 本版本**没有**;给已摆放的 Actor 挂组件的正确姿势是 Subobject 子系统(编辑器"细节面板 +Add Component"同款):
+  ```python
+  sds = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
+  handles = sds.k2_gather_subobject_data_for_instance(actor)   # [0] = 根
+  par = unreal.AddNewSubobjectParams()
+  par.set_editor_property('parent_handle', handles[0])
+  par.set_editor_property('new_class', unreal.GSRedirectorComponent)
+  h, fail = sds.add_new_subobject(par)
+  comp = actor.get_components_by_class(unreal.GSRedirectorComponent)[0]
+  ```
+  加完 `LevelEditorSubsystem.save_current_level()` 落盘;实例组件随关卡(umap)保存,编辑器重启后仍在(实测)。关卡 Actor 数据存在 umap 里还是 `__ExternalActors__` 里,`git status` 一看便知(本次全在 umap)。
+- `line_trace_multi` 的 python 简写不行(第 9 个位置参数被当成 TraceColor 结构报 NativizeProperty 错)→ 用 `line_trace_single` **链式续打**(命中点沿方向推进 3cm 再打),等价多命中。
+- **"某点能不能放半径 R 的球"用球面探针判定**:`sphere_trace_single(start=p, end=p+1cm, radius=R, trace_complex=True)` 读 `to_dict()['initial_overlap']`——比拿三角面数据重建形状省事得多(栅格扫一遍就是"球心可行空间"地图;关卡的坡度/滑梯内径/通道宽度就是这么量出来的)。
+- 编辑器里改**资产**物理碰撞:5.8 的枚举名是 `unreal.CollisionTraceFlag.CTF_USE_COMPLEX_AS_SIMPLE`(复杂碰撞当简单用,三角面直接参与物理);`mesh.get_editor_property('body_setup').set_editor_property('collision_trace_flag', ...)` + `EditorAssetLibrary.save_loaded_asset(mesh)`,PIE 复制世界时会重新注册生效。

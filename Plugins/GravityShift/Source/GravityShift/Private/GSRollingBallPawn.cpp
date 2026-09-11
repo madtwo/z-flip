@@ -255,7 +255,189 @@ void AGSRollingBallPawn::ApplyBallProfile(UGSBallProfile* NewProfile)
 
 FVector AGSRollingBallPawn::GetActiveGravityDirection() const
 {
+	// 转向器过渡期间以过渡中的中间方向为准:相机抬升、驱动平面、物理重力读到同一个源,
+	// 滑行全程连续;过渡结束提交管理器后两者一致,不会二次跳变。
+	if (bGravityRedirectActive)
+	{
+		return GravityRedirectCurrent;
+	}
 	return GravityManager ? GravityManager->GetGravityDirection() : FVector(0.0, 0.0, -1.0);
+}
+
+float AGSRollingBallPawn::GetGravityRedirectProgress() const
+{
+	if (!bGravityRedirectActive)
+	{
+		return 1.0f;
+	}
+	return FMath::Clamp(GravityRedirectPathCm / FMath::Max(GravityRedirectPathLength, 1.0f), 0.0f, 1.0f);
+}
+
+void AGSRollingBallPawn::BeginGravityRedirect(FVector TargetGravityDirection, float RideSpeedCm, FVector BendAxis, float RidePathLengthCm)
+{
+	const FVector Target = TargetGravityDirection.GetSafeNormal();
+	if (Target.IsNearlyZero())
+	{
+		return;
+	}
+	const FVector Current = GetActiveGravityDirection().GetSafeNormal();
+	if (FVector::DotProduct(Current, Target) > 0.9995f)
+	{
+		// 已经在目标面上(例如刚滑出又路过触发盒),无需过渡。
+		return;
+	}
+
+	GravityRedirectFrom = Current;
+	GravityRedirectTo = Target;
+	GravityRedirectCurrent = Current;
+	GravityRedirectAxis = BendAxis.GetSafeNormal();
+	if (GravityRedirectAxis.IsNearlyZero())
+	{
+		GravityRedirectAxis = FVector::CrossProduct(Current, Target).GetSafeNormal();
+	}
+	GravityRedirectSpeed = FMath::Max(RideSpeedCm, 0.0f);
+	GravityRedirectPathLength = FMath::Max(RidePathLengthCm, 1.0f);
+	GravityRedirectPathCm = 0.0f;
+	GravityRedirectHoldElapsed = 0.0f;
+	bGravityRedirectRotationCommitted = false;
+	bGravityRedirectActive = true;
+
+	if (GravityBody)
+	{
+		GravityBody->SetGravityDirectionOverride(GravityRedirectCurrent);
+	}
+}
+
+void AGSRollingBallPawn::EndGravityRedirect()
+{
+	if (!bGravityRedirectActive)
+	{
+		return;
+	}
+
+	// 旋转没走完就补完:中途释放不能留下一个介于两个面之间的重力方向。
+	GravityRedirectCurrent = GravityRedirectTo;
+	if (!bGravityRedirectRotationCommitted)
+	{
+		bGravityRedirectRotationCommitted = true;
+		if (GravityManager)
+		{
+			GravityManager->RequestGravityDirection(
+				GSGravity::VectorToDirection(GravityRedirectTo), this, EGSGravityChangeReason::SCRIPTED, true);
+		}
+	}
+	if (GravityBody)
+	{
+		GravityBody->SetGravityDirectionOverride(FVector::ZeroVector);
+	}
+	bGravityRedirectActive = false;
+}
+
+void AGSRollingBallPawn::UpdateGravityRedirect(float DeltaSeconds)
+{
+	if (!bGravityRedirectActive)
+	{
+		return;
+	}
+
+	const float Dt = FMath::Clamp(DeltaSeconds, 0.0f, 0.1f);
+	GravityRedirectHoldElapsed += Dt;
+
+	// 1) 滑行:指令速度 = 弯道当前切向 forward = cross(当前上, 弯道轴),随重力一起旋转。
+	//    再用"球下探针"找到实际接触面:切向速度投影到接触面切平面,并按空隙补一个
+	//    法向吸附速度——理想弧线与布尔网格实际形状的偏差都被这一步吃掉,球贴着滑梯
+	//    面走,不会在半坡飞出去。
+	const FVector Up = (-GravityRedirectCurrent).GetSafeNormal();
+	FVector Forward = FVector::CrossProduct(Up, GravityRedirectAxis).GetSafeNormal();
+	if (Forward.IsNearlyZero())
+	{
+		Forward = GravityRedirectTo;
+	}
+
+	const float Radius = BallCollision ? BallCollision->GetScaledSphereRadius() : 0.0f;
+	float GapCm = 0.0f;
+	FVector ContactNormal = FVector::ZeroVector;
+	bool bHasSurface = false;
+	FString ContactName = TEXT("air");
+	if (const UWorld* World = GetWorld())
+	{
+		if (BallCollision)
+		{
+			const FVector BallLoc = BallCollision->GetComponentLocation();
+			FHitResult GroundHit;
+			FCollisionQueryParams GroundParams(SCENE_QUERY_STAT(GSRedirectProbe), false, this);
+			if (World->LineTraceSingleByChannel(GroundHit, BallLoc,
+				BallLoc - Up * (Radius + SurfaceFollowRangeCm), ECC_WorldStatic, GroundParams))
+			{
+				bHasSurface = true;
+				ContactNormal = GroundHit.Normal.GetSafeNormal();
+				GapCm = GroundHit.Distance - Radius;
+				if (GroundHit.GetActor())
+				{
+					ContactName = GroundHit.GetActor()->GetName();
+				}
+			}
+		}
+	}
+
+	FVector DesiredVelocity = Forward * GravityRedirectSpeed;
+	if (bHasSurface && !ContactNormal.IsNearlyZero())
+	{
+		const float NormalSpeed = FMath::Clamp(-GapCm * SurfaceFollowGain,
+			-GravityRedirectSpeed, GravityRedirectSpeed);
+		DesiredVelocity = FVector::VectorPlaneProject(DesiredVelocity, ContactNormal)
+			+ ContactNormal * NormalSpeed;
+	}
+
+	const FVector ActualVelocity = BallCollision ? BallCollision->GetPhysicsLinearVelocity() : FVector::ZeroVector;
+	if (BallCollision && BallCollision->IsSimulatingPhysics() && GravityRedirectSpeed > 0.0f)
+	{
+		BallCollision->SetPhysicsLinearVelocity(DesiredVelocity.GetSafeNormal() * GravityRedirectSpeed);
+		// 旋转进度按"实际走掉的位移"累计(球被挡住时重力先不转,不会脱节)。
+		GravityRedirectPathCm += ActualVelocity.Size() * Dt;
+	}
+
+	// 2) 重力随滑行距离旋转(smoothstep 起步/收尾柔和)。按距离而不是按时间推进:
+	//    球滚得快就转得快,离开坡顶时重力已到出口方向,不会半路"重力转完球还在坡上"。
+	const float Alpha = FMath::Clamp(GravityRedirectPathCm / GravityRedirectPathLength, 0.0f, 1.0f);
+	const float Eased = Alpha * Alpha * (3.0f - 2.0f * Alpha);
+	const FQuat Delta = FQuat::FindBetweenNormals(GravityRedirectFrom, GravityRedirectTo);
+	GravityRedirectCurrent = FQuat::Slerp(FQuat::Identity, Delta, Eased).RotateVector(GravityRedirectFrom);
+
+	if (GravityBody)
+	{
+		GravityBody->SetGravityDirectionOverride(GravityRedirectCurrent);
+	}
+
+	if (bRedirectDebugLog)
+	{
+		const FVector BallLoc = BallCollision ? BallCollision->GetComponentLocation() : FVector::ZeroVector;
+		UE_LOG(LogTemp, Log, TEXT("[GSRedirect] t=%.2f ball=(%.0f,%.0f,%.0f) actual=(%.0f,%.0f,%.0f) cmd=(%.0f,%.0f,%.0f) contact=%s gap=%.0f up=(%.2f,%.2f,%.2f) prog=%.2f/%.0f"),
+			GravityRedirectHoldElapsed, BallLoc.X, BallLoc.Y, BallLoc.Z,
+			ActualVelocity.X, ActualVelocity.Y, ActualVelocity.Z,
+			DesiredVelocity.X, DesiredVelocity.Y, DesiredVelocity.Z,
+			*ContactName, GapCm, Up.X, Up.Y, Up.Z, GravityRedirectPathCm, GravityRedirectPathLength);
+	}
+
+	// 3) 旋转走完即提交(此时物理方向与管理器方向一致,提交无跳变);滑行本身持续到
+	//    球离开滑梯——由转向器调 EndGravityRedirect。
+	if (!bGravityRedirectRotationCommitted && Alpha >= 1.0f)
+	{
+		bGravityRedirectRotationCommitted = true;
+		if (GravityManager)
+		{
+			GravityManager->RequestGravityDirection(
+				GSGravity::VectorToDirection(GravityRedirectTo), this, EGSGravityChangeReason::SCRIPTED, true);
+		}
+	}
+
+	// 4) 保险:超时强制释放,避免异常状态下永久夺走玩家控制。
+	if (GravityRedirectHoldElapsed >= GravityRedirectMaxSeconds)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[GSRedirect] 滑行超时 %.1fs 强制释放(检查转向器触发盒/出口方向)"),
+			GravityRedirectHoldElapsed);
+		EndGravityRedirect();
+	}
 }
 
 FQuat AGSRollingBallPawn::BuildCameraRotation(const FVector& UpVector, float AdditionalPitchDegrees) const
@@ -469,6 +651,12 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 {
 	if (!BallCollision || !BallCollision->IsSimulatingPhysics())
 	{
+		return;
+	}
+
+	if (bGravityRedirectActive)
+	{
+		// 转向器滑行期间由重力旋转接管:不施加 WASD 驱动、不刹车,玩家输入不干扰滑行。
 		return;
 	}
 
@@ -690,6 +878,9 @@ void AGSRollingBallPawn::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
+	// 转向器过渡先于移动/相机推进:三者读到同一个平滑重力方向。
+	UpdateGravityRedirect(DeltaSeconds);
+
 	if (bInputLocked)
 	{
 		// A center-screen message is up: suppress all gameplay input (roll/flip/
@@ -780,6 +971,11 @@ void AGSRollingBallPawn::AddCameraLookInput(float YawDeltaDegrees, float PitchDe
 
 void AGSRollingBallPawn::HandleFlipPressed()
 {
+	// 转向器滑行期间忽略 G:过渡由转向器接管,中途打断会让方向与弯道脱节。
+	if (bGravityRedirectActive)
+	{
+		return;
+	}
 	RequestManualGravityFlip();
 }
 
@@ -828,6 +1024,12 @@ EGSGravityDirection AGSRollingBallPawn::GetCurrentGravityDirection() const
 void AGSRollingBallPawn::HandleSetGravityAxis(EGSGravityAxis Axis)
 {
 	if (!GravityManager)
+	{
+		return;
+	}
+
+	// 转向器滑行期间忽略 1/2/3,理由同 G。
+	if (bGravityRedirectActive)
 	{
 		return;
 	}

@@ -73,6 +73,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "GravityShift")
 	void RefreshReferences();
 
+	// 转向器过渡用:非零时取代管理器方向(单位向量),让重力方向可以连续旋转。
+	// 由转向器经 Pawn 逐帧写入,过渡结束清零恢复。相机/驱动平面读 Pawn 的同一份值。
+	UPROPERTY(Transient, VisibleAnywhere, BlueprintReadOnly, Category = "GravityShift")
+	FVector GravityDirectionOverride = FVector::ZeroVector;
+
+	UFUNCTION(BlueprintCallable, Category = "GravityShift")
+	void SetGravityDirectionOverride(FVector NewDirection);
+
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
 	FVector GetGravityDirection() const;
 

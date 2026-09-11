@@ -53,6 +53,7 @@
 | `GS Kill Volume` | 出界重置 | 房间上下边界外各一个(重力会翻转) |
 | `GS Checkpoint` / `GS Collectible` / `GS Finish Goal` | 检查点 / 收集物 / 终点 | 摆上即用 |
 | `GS Camera Rail` | 导轨相机轨道(防晕;不摆=旧跟随相机) | 本地 Z=轨道方向,`RailLength`=全长;详见 USAGE_WHITEBOX「相机导轨」 |
+| **转向器** = 滑梯网块 + `GS Redirector` 组件 | 滑梯式重力转向:球碰到正面圆弧自动滑上连接的墙面/天花板,重力随之转向(双向;撞侧面不触发) | 滑梯网格+组件配 `GravityDirectionA/B` 两个面;**拼装手册见 `AgentSkill/gs-redirector-assembly/SKILL.md`**(测试关四个转向器实测) |
 
 自动挂在球身上、不用摆的组件(细节面板可调):`GS Gravity Body`(重力受力)、`GS Landing Response`(**落地三带**:按网格自动判 ≤4格安静 / 5–6格反弹到4格 / ≥7格反重力,参数分组 `GravityShift|Landing|Grid`)、`GS Rail Camera`(导轨相机手感)。砸碎链:破坏者方块(`DA_GS_Block_GravityBreaker`)真砸到可破坏块(`bBreakable` + `DA_GS_Break_Fragile`)就会按能量击碎,无需额外配置。
 
@@ -83,6 +84,7 @@
 
 - `USAGE_WHITEBOX.md` — 白盒装配指南(文件存放规范/类清单/配置/标签约定/python 批量摆法)
 - `AgentSkill/gs-block-assembly/SKILL.md` — **关卡侧 AI 专用积木拼装 skill**(拿白盒地图→拼成可玩关卡,配方实测)
+- `AgentSkill/gs-redirector-assembly/SKILL.md` — **转向器(滑梯式重力转向)拼装 skill**(摆滑梯/配两面/触发语义/PIE 自验配方,全实测)
 - `AGENT_GUIDE.md` — AI 接手指南(环境/连接/编译/排雷入口)
 - `HANDOVER_zflip.md` — 完整交接史(每轮工作、踩坑与修复)
 - `AgentSkill/ue-nocode/` — UE 无代码操控工作手册(AI skill,含按症状查询的主题手册)
