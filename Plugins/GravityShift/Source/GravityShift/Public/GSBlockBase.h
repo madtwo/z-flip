@@ -95,6 +95,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	bool bGravityRises = false;
 
+	// 非竖直重力(2026-09-13):空(0,0,0)=沿用老行为的世界 ±Z;填非零向量则按
+	// **方块自身坐标系**的该轴定重力,bGravityRises 定正负(false=沿 -轴)。
+	// 例:要重力朝自身 -X → 填 (1,0,0) 且 bGravityRises 保持 false。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
+	FVector GravityAxisLocal = FVector::ZeroVector;
+
+	/** 当前重力方向(世界空间)。零轴哨兵 = 老的世界 ±Z。 */
+	FVector GetGravityAxisWorld() const;
+
 	// 准星瞄准时的"边缘发光"覆盖材质(半透明菲涅尔);空则无高亮。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "GravityShift")
 	TObjectPtr<UMaterialInterface> AimGlowMaterial = nullptr;

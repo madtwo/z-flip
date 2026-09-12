@@ -1,6 +1,6 @@
 # GravityShift v5 — 进度同步 / 交接文档（z-flip 项目）
 
-> 更新时间：2026-09-05 (GMT+8)
+> 更新时间：2026-09-13 (GMT+8)
 > 状态：v5 已验收（§8-§10）；v6 六方向已同步本机并编译（§11；+Y 贴墙/G 两墙摆荡已 PIE 抽测通过，§11.9 全用例矩阵仍待实机）；**§12 = 导轨相机(防晕)+ 全表面操作映射 + Q/E 玩家调距,PIE 验证通过,待用户完整手感验收**
 > **§13 = 2026-09-04 第七轮交付：障碍物物理砸碎修复(根因 tick 自检+PIE 15369J)+ 玩家球落地三带网格联动(≤4格安静/5-6格反弹/≥7格反重力,弹回4格)**,均 Live Coding+PIE 验证通过;实机手感 & 前台 7格边界验收待用户
 > **§14 = 2026-09-04 第八轮交付：拾取物品 + 拾取钥匙开门(F 交互/拾取锁屏消息空格继续/门按 RequiredKeyID 配对/滑开动画/死亡重置回锁复位)**,UBT 编译通过 + PIE 全用例验收(18/18 断言 + 滑门开/关时序);详见 §14,剩一处已知滑门落座偏差见 §14.6
@@ -8,6 +8,7 @@
 > **§25 = 2026-09-11 第十七轮交付：相机俯仰反转修复(鼠标上抬→相机上抬)+ 重力区域检测器系统(检测器/区域管理器两个新类,"禁用重力"= 停重力+清速度瞬间定住)**,UBT 编译通过 + PIE 7/7 全过;关卡侧拼装手册见 `AgentSkill/gs-gravity-zone-assembly/SKILL.md`,遗留:两个 Zone 数组按需求留空待后续 AI 按空间位置填
 > **§26 = 2026-09-12 第十八轮交付：「手感还原」交接——用户实机验收的最新手感(丝滑相机+球下1/3+平面加速度驱动)就是主线 `2c3c1a2` 的默认状态,谁都不用改任何参数;队友端"操作老版本"= dll 没重编(源码/资产都是新的)。还原步骤+手感验收清单+参数基准+禁改清单见 §26;PIE 调试 HUD 顶部新增 `GS build <编译时间>` 一行,一秒鉴定 dll 新旧**
 > **§27 = 2026-09-12 第十九轮交付：新重力机制(用户四条需求,实机验收通过)——①G/1/2/3 删除,物体重力只剩 ±Z;②玩家重力只由转向器圆弧控制;③按住右键出准星(TPS 聚焦+越肩+边缘微光)左键切换方块升/降;④导轨相机/重力开关退场,默认无导轨相机。组装手册 `AgentSkill/gs-aim-gravity-assembly/SKILL.md`;实现记录与两条泛用定式见 §27**
+> **§29 = 2026-09-13 第二十轮：方块「非竖直重力」功能(GravityAxisLocal,零向量=老行为)+ P2 两个 LDI_Gravityshift 转向器化 + 2/3/4 号瞄准开火改造 + 4 号「开火没用」诊断(结论:出生位被几何夹死)**;全部只动 `Re_Blockout.umap` + GSBlockBase 两个源码文件,dll 已重编。4 号上限已从 3000 降到 500,但**它在出生位仍不可动,建议换位/抬高,见 §29.5**
 > 写这份文档的目的：先把做到哪、卡在哪、改了什么、踩了什么雷同步清楚，供人工诊断。
 
 ---
@@ -1111,3 +1112,82 @@ powershell -NoProfile -File Saved\capture_editor_window.ps1 -Out Saved\Screensho
 ```
 
 ⚠ **脚本刻意不做模拟点击。** 理由见 28.3 —— 抢不到前台时注入的点击会打到别人窗口上。**输入类验证交给人手。**
+
+---
+
+## 29. 2026-09-13 第二十轮:方块「非竖直重力」+ P2 转向器化 + 2/3/4 号瞄准开火改造 + 4 号卡死诊断
+
+> **需求**(用户原话按轮次):①P2 里两个 `LDI_Gravityshift` 具备 Boolean 转向器的功能 —— **能只配置就不改代码**;②`SM_LDI_GravityAffected` 2/3/4 号都要"右键瞄准高亮 + 左键开火改重力",2/3 竖直方向,**4 号要朝它自身坐标系的轴**(先要 −X,后改 −Y);③3 号初始重力反向(z 正方向);④4 号进游戏要"出现";⑤查 4 号"玩家瞄准开火没用"是不是卡住了。
+> **状态**:①②③④已配置完成并逐条 PIE 实测;**⑤诊断完成,结论=4 号出生位被几何夹死(不是参数、也不是"太大")**,已把上限降到 500 治"撞墙嵌死",**但它在出生位仍然一动不能动,位置待用户拍板(§29.5)**。
+
+### 29.1 代码改动(2 文件,已编译;dll `09-13 00:35` > 源码 `00:33`)
+
+| 文件 | 改动 |
+|---|---|
+| `Public/GSBlockBase.h` | 新增 `FVector GravityAxisLocal`(EditAnywhere)+ `FVector GetGravityAxisWorld() const` |
+| `Private/GSBlockBase.cpp` | 新增 `GetGravityAxisWorld()`:零向量哨兵 → 老的世界 ±Z;非零 → `GetActorTransform().TransformVectorNoScale(GravityAxisLocal.GetSafeNormal()) * (bGravityRises?1:-1)`。`SetGravityRises()` 与 `ApplyCurrentConfiguration()` 改走它 |
+
+- **向后兼容**:零轴哨兵让没配 `GravityAxisLocal` 的方块(哪怕被旋转过)逐字节等价于改动前。
+- **零新类、零新组件**:复用现成的 `UGSGravityBodyComponent::SetOwnGravityDirection` 与现成的瞄准/开火链路(`GSRollingBallPawn`:右键准星 `LineTraceSingleByChannel(ECC_Visibility)`,命中 `AGSBlockBase` 且 `CanChangeGravity()` → 高亮;左键 `ToggleGravityZ()` → 翻 `bGravityRises` + 唤醒刚体)。**这套链路本轮未改一行代码。**
+- 顺带确认:`CanChangeGravity() = GravityBody && Mesh->IsSimulatingPhysics() && GravityBody->bGravityEnabled` —— **重力被禁用的方块既不高亮也不响应开火**。
+
+### 29.2 关卡侧配置(全部只动 `Content/Maps/Re_Blockout.umap`,已存盘 + 重载验证)
+
+**(1) P2 两个 `LDI_Gravityshift` —— 配成转向器,只配置不改代码**(给它们配 `GSRedirectorComponent`):
+
+| 对象 | 类 | 位置 / 旋转 | `gravity_direction_a` | `gravity_direction_b` |
+|---|---|---|---|---|
+| `LDI_Gravityshift` | StaticMeshActor + `GSRedirectorComponent` | (800,-100,0) / Y90 | `NEGATIVE_Z` | `NEGATIVE_X` |
+| `LDI_Gravityshift2` | StaticMeshActor + `GSRedirectorComponent` | (800,-1300,0) / Y-90 R90 | `NEGATIVE_X` | `NEGATIVE_Z` |
+
+其余为组件默认值(`contact_touch_margin_cm=20` / `entry_face_gravity_min=0.5` / `min_trigger_speed_cm=20` / `slow_entry_speed_cm=100` / `ride_speed_cm=800` / `max_ride_speed_cm=1200` / `min_entry_speed_cm=500`)。A/B 填的是**模型自身两个口面的世界方向**,错填成另一个垂直面会**静默不触发**(见 memory `gs-redirector-ab-convention`)。
+
+**(2) 三个 `SM_LDI_GravityAffected` —— 全换成 `BP_GSBlockBase_C` 并接上瞄准/开火**(`aim_glow_material = /GravityShift/Materials/M_GS_RimGlow`,是现成资产):
+
+| 号 | 位置 / 旋转 / 缩放 | `gravity_axis_local` | `gravity_rises` | → 初始重力 | `maximum_speed_cm` |
+|---|---|---|---|---|---|
+| 2 | (860,2470,300) / Y-21 / (2.5,2,2.5) | (0,0,0) 零哨兵 | False | 世界 **−Z** | 3000 |
+| 3 | (1036,-955,900) / Y-150 R180 / 1.5 | (0,0,0) 零哨兵 | **True** | 世界 **+Z** | 3000 |
+| 4 | (600,-2000,100) / 0 / (0.99,0.99,1.98) | **(0,1,0)** | False | **自身 −Y** | **500** |
+
+三者的公共项:`mass_override_kg=40` / `immovable_mass_kg=2000` / `gravity_scale=1` / `affected_by_gravity=True` / 组件 `use_own_gravity_direction=True`(`gravity_direction_override` 留空)/ 自带编译好的 `GravityBody`+`SurfaceReceiver`+`Breakable`+`Resettable`+`GridSnap` 组件。
+
+- `maximum_speed_cm` 是 **actor 上的属性**:`ApplyCurrentConfiguration()` 在 BeginPlay 会把它抄进 `GravityBody->MaximumSpeedCm`,**只改组件属性会被覆盖**。
+- 存盘用 `LevelEditorSubsystem.save_current_level()`,然后 **`load_level()` 重新从磁盘读一遍核对**(`save_dirty_packages()` 曾静默不落盘)。
+
+### 29.3 4 号"开火没用"诊断(结论:出生位夹死,不是参数)
+
+链路本身是好的:射线能命中 4 号本体、`can_change_gravity()=True`、`toggle_gravity_z()` 确实翻转 `gravity_rises`、方块也确实移动过(翻到 +Y 后滑了约 8m)。
+
+**真正的问题在出生位**:
+
+| 测法(同一 PIE 会话) | 结果 |
+|---|---|
+| 出生位 (600,-2000,100) 观察 8s | `v=0`,位置一动不动 |
+| 出生位注入 (600,-600,600) 三向速度 | **一个物理帧全清零**,位置只漂 ~1cm |
+| 同 XY 抬到 z=200 | 照样锁死 |
+| **把方块高度 200→100(缩小)** | **照样锁死** → 不是"太大" |
+| 同 XY 抬到 z=400 | 立刻 549cm/s 沿 −Y 滑走;沿坡面下滑,落点面 ≈z520 |
+| 出生位向下压(z 注入 −900) | 像在实体里"蹭",6s 后只剩 −157 |
+
+→ 那个 XY 的地面/实心面远高于 z=100,**方块出生时整个人埋在几何里**;方块本身没坏(同一方块在空旷处/抬高后立刻正常加速)。尺寸上 4 号(100×100×200)还是三个里最小的(3 号 204×204×150、2 号 306×276×250)。
+
+### 29.4 本轮新踩的坑(都写进 memory `gs-block-pinned-by-geometry`)
+
+1. **"卡住"要分型**:单向不动 = 被某个面顶住(正常);**任何方向都清零 = 埋在实体里**。分型靠"塞速度看回读",不要靠射线推断。
+2. **`line_trace_multi` 对同一个 component 只报一次交点**:白盒地形是单个 mesh 时,射线只能给出"第一个面",后面的全查不到 —— 量净空要用短段单射线逐段扫。
+3. **PIE 运行期间 `get_editor_world()` 返回 `None`**(报 "null world context"),要改用 `get_game_world()`。
+4. `sphere_overlap_actors` **最多 6 个参数**,`actors_to_ignore` 传 `[]` 会报 "Failed to convert parameter"。
+5. 判"方块是死是活"的通用手法:**瞬移到空旷高空(或同 XY 抬高)对比**。同一方块在那能动 = 方块和参数都没问题,问题在位置。
+
+### 29.5 遗留 / 待用户拍板
+
+1. **4 号出生位仍不可动**:现只把上限降到 500(治"高速撞进白盒后嵌死")。要它开局就能动,得**抬到地面之上**(同 XY 的 z≈520 那一带是自由的)或**换 XY**。用户未定,我没擅自挪。
+2. **3 号的老账仍在**:初始重力改成 +Z 后,它上方 z=1000 有白盒地形面,顶端 ≈975 → 只有 25cm 净空,升 25cm 就顶死(看着像静止)。换位置或换重力方向都行,同样待拍板。
+3. 工作树 3 个未提交:`GSBlockBase.h/.cpp` + `Re_Blockout.umap`。
+
+### 29.6 给下一个 AI
+
+- **想让某个方块非竖直重力**:填它的 `GravityAxisLocal`(自身坐标系,如 `(0,1,0)`=自身 Y 轴)+ `bGravityRises` 定正负(`false`=沿 −轴),**不需要改代码**。零向量=老的世界 ±Z。
+- **方块不动先分型再动手**(§29.4-1),别一上来就调参数:参数调不出几何问题。
+- 关卡的卡点、射线坑、`save_current_level` 验证法都记在 memory `gs-block-pinned-by-geometry`;P2 转向器的 A/B 口面约定在 `gs-redirector-ab-convention`。

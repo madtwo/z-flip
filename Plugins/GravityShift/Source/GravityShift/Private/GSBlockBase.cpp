@@ -143,12 +143,24 @@ bool AGSBlockBase::CanChangeGravity() const
 	return GravityBody && Mesh && Mesh->IsSimulatingPhysics() && GravityBody->bGravityEnabled;
 }
 
+FVector AGSBlockBase::GetGravityAxisWorld() const
+{
+	// 零轴哨兵 = 老行为(世界 ±Z)。没配过 GravityAxisLocal 的方块(哪怕被旋转过)
+	// 逐字节等价于改动前,不会被本特性误伤。
+	if (GravityAxisLocal.IsNearlyZero())
+	{
+		return FVector(0.0, 0.0, bGravityRises ? 1.0 : -1.0);
+	}
+	return GetActorTransform().TransformVectorNoScale(GravityAxisLocal.GetSafeNormal())
+		* (bGravityRises ? 1.0 : -1.0);
+}
+
 void AGSBlockBase::SetGravityRises(bool bRises)
 {
 	bGravityRises = bRises;
 	if (GravityBody)
 	{
-		GravityBody->SetOwnGravityDirection(FVector(0.0, 0.0, bRises ? 1.0 : -1.0), true);
+		GravityBody->SetOwnGravityDirection(GetGravityAxisWorld(), true);
 	}
 }
 
@@ -231,10 +243,10 @@ void AGSBlockBase::ApplyCurrentConfiguration()
 		GravityBody->BaseImpactEnergyMultiplier = ImpactEnergyMultiplier;
 		GravityBody->ImpactSourceTag = ImpactSourceTag;
 		GravityBody->bCanBreakTargets = bCanBreakTargets;
-		// 新机制:物体重力恒为 ±Z(方向由 bGravityRises 定),不再跟随管理器
-		// 提交的全局方向——玩家转向器/落地反转不再带动方块,方块重力只由
+		// 新机制:物体重力恒定(方向由 bGravityRises / GravityAxisLocal 定),不再跟随
+		// 管理器提交的全局方向——玩家转向器/落地反转不再带动方块,方块重力只由
 		// 准星瞄准+左键改变(掉下来 ↔ 升起来)。
-		GravityBody->SetOwnGravityDirection(FVector(0.0, 0.0, bGravityRises ? 1.0 : -1.0), true);
+		GravityBody->SetOwnGravityDirection(GetGravityAxisWorld(), true);
 		GravityBody->RefreshReferences();
 	}
 
