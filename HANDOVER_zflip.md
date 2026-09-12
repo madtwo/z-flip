@@ -6,6 +6,7 @@
 > **§14 = 2026-09-04 第八轮交付：拾取物品 + 拾取钥匙开门(F 交互/拾取锁屏消息空格继续/门按 RequiredKeyID 配对/滑开动画/死亡重置回锁复位)**,UBT 编译通过 + PIE 全用例验收(18/18 断言 + 滑门开/关时序);详见 §14,剩一处已知滑门落座偏差见 §14.6
 > **§15 = 2026-09-05 第九轮交付：§13/§14 拉取同步本机+重编 + 「积木式」对接文档(README 功能积木清单 / USAGE_WHITEBOX 文件存放规范+拾取钥匙门手册),手册摆法已实机 PIE 走通**;关卡策划对接入口 = README「功能积木清单」→ USAGE_WHITEBOX
 > **§25 = 2026-09-11 第十七轮交付：相机俯仰反转修复(鼠标上抬→相机上抬)+ 重力区域检测器系统(检测器/区域管理器两个新类,"禁用重力"= 停重力+清速度瞬间定住)**,UBT 编译通过 + PIE 7/7 全过;关卡侧拼装手册见 `AgentSkill/gs-gravity-zone-assembly/SKILL.md`,遗留:两个 Zone 数组按需求留空待后续 AI 按空间位置填
+> **§26 = 2026-09-12 第十八轮交付：「手感还原」交接——用户实机验收的最新手感(丝滑相机+球下1/3+平面加速度驱动)就是主线 `2c3c1a2` 的默认状态,谁都不用改任何参数;队友端"操作老版本"= dll 没重编(源码/资产都是新的)。还原步骤+手感验收清单+参数基准+禁改清单见 §26;PIE 调试 HUD 顶部新增 `GS build <编译时间>` 一行,一秒鉴定 dll 新旧**
 > 写这份文档的目的：先把做到哪、卡在哪、改了什么、踩了什么雷同步清楚，供人工诊断。
 
 ---
@@ -877,3 +878,72 @@ Manager 由 GameMode BeginPlay 自动 spawn,BeginPlay **可能延迟到下一 ti
 2. **与 `AGSWorldStateManager::ResetWorld` 接线**——`OnResetWorld()` 已留桩(等价 `ResetAllZones()`),尚未挂进死亡重置流程。
 3. **闪光材质**——目前只有显隐翻转,自发光观感待关卡/美术配。
 4. **相机俯仰修复的实机验收**——PIE 逻辑已验证,用户手感验收待做(注意导轨相机下俯仰本就不生效,见 25.1)。
+
+---
+
+## 26. 2026-09-12 第十八轮:「手感还原」交接(给队友/队友侧 AI 的操作手册)
+
+**一句话结论:用户 2026-09-12 在 Blockout 白盒实机验收通过的最新手感 = 主线 `2c3c1a2` 的默认状态。你不需要改任何代码或参数——拉最新 → 关编辑器重编 → 看 HUD 时间戳,三步还原。**
+
+### 26.1 发生了什么(「很神秘」的真相)
+
+- 现象:你那边源码是新的、测试关里圆弧(转向器)也看得见,但操作是老手感。
+- 根因:**dll 是旧的**。你 9-11 开发重力区域时编译测试(PIE 7/7)发生在**拉取 `5f57481` 之前**——那次编出的 dll 里没有我们的相机优化(§17/§19)和转向器模块;之后你拉取并推送了 `51f9c66`(源码/资产都更新了),但**没有再重编**,所以跑的还是旧 dll。
+- 为什么"看起来矛盾":关卡资产(umap)不用编译,进编辑器就生效——所以圆弧看得见;而操作手感活在 dll 里——所以操作是老的。**资产新 ≠ 运行时新。**
+- 自查证据:旧 dll 的 PIE 里 HUD 没有 `GS build` 行(新增的),球在画面正中央(不是下 1/3),滚进圆弧不会滑上墙。
+
+### 26.2 还原步骤(机械执行,约 3 分钟)
+
+1. `git pull`(远端 main = `2c3c1a2`,已含你的 51f9c66 全部内容 + 编译时间戳)。
+2. **彻底退出虚幻编辑器**(不是最小化/关一个窗口)。编辑器开着时 Live Coding 会挡住编译,报 `Unable to build while Live Coding is active`——这就是"编了但没生效"的头号原因。
+3. 重新编译(IDE 里 Build,或命令行 UBT)。
+4. 核对:`Plugins/GravityShift/Binaries/Win64/UnrealEditor-GravityShift.dll` 的修改时间应晚于你刚才的编译动作。
+5. 开编辑器 → 任意关进步 PIE → **HUD 第一行 = `GS build <日期 时间>`,这个时间就是你这次编译的时刻**。日期是旧的 = 编译没生效,回到第 2 步。
+
+### 26.3 手感验收清单(Blockout 无导轨关最直观;用户已按此验收通过 ✅)
+
+| 检查 | 预期 |
+|---|---|
+| 构图 | 球稳定在**画面下 1/3**(天花板态在上方 1/3,用户定案) |
+| 相机 | 移动/翻转全程平滑无抖动,无"写后漂移"卡顿 |
+| 鼠标 | **上抬 = 抬头**(25.1 修复后;仅无导轨相机动,导轨关俯仰本就不动) |
+| WASD | 快而跟手(平面加速度驱动,终端速度 ≈ 1000 cm/s),松键 ~1s 停稳 |
+| G 翻转 | 翻转前后同一鼠标动作的屏幕转向**语义一致** |
+| 落地三带 | 小落差安静 / 中等弹回原高 / ≥20 格落差反重力(10/20/10,你的 §21) |
+| 测试案例关 | 滚进圆弧自动"滑"上墙、重力平滑转过 90°(转向器,§22-24) |
+
+### 26.4 参数基准(手感出问题先对这张表,**不要凭感觉改参数"还原"**)
+
+| 参数 | 值 | 定义在哪 | 拉取+重编后自动一致? |
+|---|---|---|---|
+| `DriveAccelerationCm` | **3600** | `Content/GravityShift/Data/Profiles/DA_GS_Ball_Default.uasset`(资产,git 同步) | ✅ |
+| `CameraPivotLiftHeightCm` | 150 | Pawn C++ 默认(`GSRollingBallPawn.h`) | ✅(dll 新即一致) |
+| `CameraFollowInterpSpeed` | 18 | C++ 默认(GSProfiles.h) | ✅ |
+| `ReleaseBrakeHz` | 3.0 | C++ 默认(GSProfiles.h) | ✅ |
+| 鼠标灵敏度 | Yaw 0.35 / Pitch 0.25 | C++ 默认(GSProfiles.h) | ✅ |
+| 落地三带 | 10/20/10 | C++ 默认(你的 §21) | ✅ |
+| 接触回弹 | Restitution=0 | C++(你的 §21) | ✅ |
+
+对照命令(PIE 里读运行值,可贴进远程 python 直接跑):
+
+```python
+import unreal
+w = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
+b = unreal.GameplayStatics.get_player_pawn(w, 0)
+print(b.get_editor_property("drive_acceleration_cm"),      # 期望 3600.0
+      b.get_editor_property("camera_pivot_lift_height_cm"), # 期望 150.0
+      b.get_editor_property("camera_follow_interp_speed"))  # 期望 18.0
+```
+
+### 26.5 禁改清单(改任何一项 = 用户验收过的手感消失)
+
+- `CameraPivotLiftHeightCm`(下 1/3 构图)、DA 的 `DriveAccelerationCm`(驱动速度)、`CameraFollowInterpSpeed`(丝滑度)、`AddCameraLookInput` 调用点的俯仰符号(25.1)、落地三带 10/20/10。
+- 若手感验收不过:先看 `GS build` 日期(dll 旧)→ 再用 26.4 的命令对参数(有出入=资产没拉全)→ 都对还不对,把现象+参数读值发回主线,**别直接改参数**。
+
+### 26.6 本轮改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `Private/GSFramework.cpp` | **新增**:PIE 调试 HUD 顶部一行 `GS build <编译日期 时间>`(`__DATE__ __TIME__`,即 dll 编译时刻)——"源码新但 dll 旧"的仲裁证据 |
+| `HANDOVER_zflip.md` | 本节(§26)+ 速览行 |
+| (前一轮已合入) | 你的 51f9c66 全部内容(俯仰修复/重力区域/FreezeMotion/拼装手册)已在 `2c3c1a2` 线上 |
