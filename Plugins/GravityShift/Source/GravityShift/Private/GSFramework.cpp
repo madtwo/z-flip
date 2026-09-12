@@ -140,6 +140,10 @@ void AGSGravityHUD::DrawHUD()
 
 	TArray<FString> Lines;
 
+	// 编译时间戳:一眼鉴定"跑的 dll 是哪次编的"——多人协作时"源码是新的但行为是旧的"
+	// (dll 没重编)的仲裁证据。__DATE__/__TIME__ 是本编译单元的编译时刻。
+	Lines.Add(FString::Printf(TEXT("GS build %s %s"), ANSI_TO_TCHAR(__DATE__), ANSI_TO_TCHAR(__TIME__)));
+
 	if (bShowGravityStatus)
 	{
 		AGSGravityManager* Manager = Ball->GravityManager;
