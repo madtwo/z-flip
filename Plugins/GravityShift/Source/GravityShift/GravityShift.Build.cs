@@ -13,7 +13,11 @@ public class GravityShift : ModuleRules
                 "CoreUObject",
                 "Engine",
                 "InputCore",
-                "PhysicsCore"
+                "PhysicsCore",
+                // 主菜单 / 设置面板是纯 C++ 建的 UMG,没有蓝图资产。
+                "UMG",
+                "Slate",
+                "SlateCore"
             }
         );
     }

@@ -259,6 +259,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0"))
 	float CameraPitchDegreesPerMouseUnit = 0.25f;
 
+	// 用户设置里的灵敏度倍率(UGSSettingsSaveGame)。BeginPlay 读一次存档缓存,
+	// 不每帧读盘;设置面板拖动时会直接改这里,当场生效。
+	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0"))
+	float MouseSensitivityMultiplier = 1.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0", ClampMax = "89.0"))
 	float MaximumCameraPitchDegrees = 70.0f;
 

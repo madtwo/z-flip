@@ -18,6 +18,7 @@
 #include "GSProfiles.h"
 #include "GSRailCameraComponent.h"
 #include "GSResettableComponent.h"
+#include "GSSettingsSaveGame.h"
 #include "GSSurfaceReceiverComponent.h"
 #include "GSWorldState.h"
 
@@ -108,6 +109,9 @@ void AGSRollingBallPawn::BeginPlay()
 	Super::BeginPlay();
 
 	RefreshSystemReferences();
+
+	// 用户灵敏度设置:开局读一次存档缓存到成员里,轮询每帧用缓存,不碰磁盘。
+	MouseSensitivityMultiplier = UGSSettingsSaveGame::LoadOrCreate()->MouseSensitivityMultiplier;
 
 	if (CameraPivot)
 	{
@@ -795,8 +799,9 @@ void AGSRollingBallPawn::PollNativeInput()
 				{
 					SensScale = FMath::Sqrt(Camera->FieldOfView / DefaultCameraFOV);
 				}
-				AddCameraLookInput(MouseX * CameraYawDegreesPerMouseUnit * SensScale,
-					MouseY * CameraPitchDegreesPerMouseUnit * SensScale);
+				// 再乘用户倍率(存档里的设置)。这里是灵敏度的唯一相乘点。
+				AddCameraLookInput(MouseX * CameraYawDegreesPerMouseUnit * SensScale * MouseSensitivityMultiplier,
+					MouseY * CameraPitchDegreesPerMouseUnit * SensScale * MouseSensitivityMultiplier);
 			}
 		}
 

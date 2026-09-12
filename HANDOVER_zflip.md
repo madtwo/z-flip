@@ -999,3 +999,115 @@ print(b.get_editor_property("drive_acceleration_cm"),      # 期望 3600.0
   - `bZeroBounceOnLand=true`(默认开):零回弹物理材质覆盖(`Restitution=0 + CombineMode=Min`,§21 球上同款写法)——±Z 切换落下的箱子稳稳停住。实测:从天花板落下 vz 连续采样 -1116 → 落地后 **vz=0.0 四连采零反弹**。
   - `bImmovableByPlayer=false`(按需开,两个演示箱已开)+ `ImmovableMassKg=2000`:质量方案(§20 同款)。自定义重力走 `bAccelChange`(质量无关加速度),**抬质量只影响被撞位移,±Z 升/降完全不受影响**。实测:球 900cm/s 连撞 4s,方块位移 **0.0cm**。
 - ⚠ **崩溃修复(重要教训)**:零回弹材质最初用函数级 `static UPhysicalMaterial*`,**静态指针不进 GC 引用图**——PIE 重启间隙被回收,下一局把悬空指针设进物理体,`BodyInstance.cpp` 直接断言崩编辑器(且悬空期接触解算被污染:方块以 ~60cm/s 爬行、无视重力切换)。修法:创建后 `AddToRoot()` + 悬空自愈重建。**凡函数级 static 持有 UObject,一律 AddToRoot**。
+
+---
+
+## 28. 2026-09-12 第十九轮:主菜单 + 设置界面(鼠标灵敏度)
+
+> **需求**:启动进主菜单(标题「Z-Flip」,「开始游戏」/「设置」);设置里一个鼠标灵敏度滑块(0.1–3.0,默认 1.0,显示 "1.0x"),拖动实时生效并**落盘**,重启编辑器保留。菜单用独立 GameMode(不生成滚球、不生成 HUD),UMG **全部 C++ 建树**(项目里没有任何 .uasset 能由代码生成)。
+
+### 28.1 交付清单
+
+| 文件 | 作用 |
+|---|---|
+| `Plugins/.../Private|Public/GSSettingsSaveGame.{h,cpp}` | `USaveGame` 子类。槽名 `ZFlipSettings`,值 `MouseSensitivityMultiplier`,钳位 0.1–3.0(上下界在 `GSSettingsLimits` 命名空间)。`LoadOrCreate()` / `SaveMultiplier(float)` 两个静态入口 |
+| `Plugins/.../Private|Public/GSMenuWidgets.{h,cpp}` | `UGSMainMenuWidget`(外壳,菜单/设置两态切换,独占输入模式)+ `UGSSettingsWidget`(只画设置内容,**不带外壳**) |
+| `Plugins/.../Private|Public/GSMenuGameMode.{h,cpp}` | `AGSMenuGameMode : AGameModeBase`。`DefaultPawnClass=nullptr` + `HUDClass=nullptr` + `bStartPlayersAsSpectators=true` |
+| `GravityShift.Build.cs` | `PublicDependencyModuleNames` 加 `UMG` / `Slate` / `SlateCore` |
+| `GSRollingBallPawn.{h,cpp}` | 新增 `MouseSensitivityMultiplier`;**唯一相乘点 :803-804** |
+| `Config/DefaultEngine.ini` | `GameDefaultMap=/Game/MainMenu`(**`EditorStartupMap` 故意保留 `/Game/测试案例`**,见 28.5) |
+| `Content/MainMenu.umap` | 空 3D 关卡,WorldSettings 里逐关卡覆盖 GameMode = `GSMenuGameMode` |
+| `Content/Python/v5/create_menu_level.py` | 建/修复上面那个关卡(幂等) |
+| `Content/Python/v5/test_settings_save.py` | 存档读写+钳位自检 |
+
+**关卡 GameMode 覆盖是逐关卡数据,写不进 ini** —— 所以必须有 .umap。.umap 是二进制代码生成不了,只能让编辑器建,`create_menu_level.py` 就是"让编辑器建"的那一步。
+
+**当前状态**:dll = `Plugins/GravityShift/Binaries/Win64/UnrealEditor-GravityShift.dll`,`2026-09-12 18:43`,之后没再改过任何源码。工作树未提交(4 改 + 8 新)。
+
+### 28.2 怎么加东西(扩展指南)
+
+**加一个菜单项** —— 三步,全在 `GSMenuWidgets.cpp`:
+1. 头文件 `UGSMainMenuWidget` 里加 `UFUNCTION() void HandleXxxClicked();`(动态委托**必须** UFUNCTION,否则 `AddDynamic` 编译不过)
+2. `BuildTree()` 里:
+   ```cpp
+   UButton* B = MakeButton(Tree, TEXT("按钮文字"), 32);
+   B->OnClicked.AddDynamic(this, &UGSMainMenuWidget::HandleXxxClicked);
+   AddRow(MenuBox, B, HAlign_Fill, 14.0f);   // 最后一个参数是上边距
+   ```
+3. 实现 `HandleXxxClicked()`。**注意 `AddRow(Shell, MenuBox, ...)` 那行必须留在最后** —— Shell 是外层竖排,先塞进去菜单就会排在设置面板后面。
+
+**加一个设置项** —— 二~三步:
+1. `GSSettingsSaveGame.h` 加 `UPROPERTY(BlueprintReadWrite)` 字段 + (需要钳位就加)在 `LoadOrCreate()` 里夹一下
+2. `UGSSettingsWidget::BuildTree()` 里加一行控件 + `UFUNCTION()` 回调
+3. 要"当场生效"就在回调里写目标对象(参照 `ApplyToLocalPawn`:直接改 Pawn 成员,不重读盘);改动频繁的**落盘要挂在松手事件**(`OnMouseCaptureEnd`),别挂 `OnValueChanged` —— 那个每帧都发,等于拖动时 60 次/秒写文件
+
+### 28.3 验证(程序化,全过 ✅)
+
+| 项 | 证据 |
+|---|---|
+| 编译 | `Result: Succeeded`(UBT 引擎 dotnet 直调 + `-NoUBA`) |
+| 存档读写+钳位 | `test_settings_save.py`:`roundtrip(2.5)` / `clamp low(-5→0.1)` / `clamp high(99→3.0)` / `restore(1.0)` → `RESULT: ALL PASS` |
+| 落盘 | `Saved/SaveGames/ZFlipSettings.sav` 实际存在(2014 B) |
+| 中文字面量过编译 | 查 dll:`/Game/测试案例`、`重力翻转`、`开始游戏`、`鼠标灵敏度` 四个 UTF-16LE 串**全在**(bash 打印乱码是控制台代码页,不是文件问题) |
+| PIE 启动进菜单 | 日志 `Game class is 'GSMenuGameMode'` + `[GSMenu] 主菜单已创建`;世界里的 Pawn 是 `SpectatorPawn`(**没有** GSRollingBallPawn)、`show_mouse_cursor: True` |
+| 菜单画面 | 截图确认:标题「Z-Flip」+「重力翻转」+「开始游戏」+「设置」,**中文无豆腐块** |
+
+**未验证(需要人手点)**:三个按钮的点击响应、滑块拖动、点「开始游戏」跳关卡。原因:模拟鼠标注入不可靠——`SetForegroundWindow` 对非前台进程经常被系统拒绝,注入的点击会打到**当时的前台窗口**上(实测打进了用户的浏览器),所以这条路停了。**请在编辑器里跑一次 PIE(当前开的是 `/Game/MainMenu`)依次点:设置 → 拖滑块 → 返回 → 开始游戏。**
+
+### 28.4 怎么重跑这些验证
+
+编辑器开着且加载本项目,在仓库根执行:
+
+```bash
+P=.claude/skills/ue-nocode/reference/ue_pyexec.py
+
+# 存档读写+钳位自检(会写真实槽,跑完自己恢复 1.0)
+python $P "exec(open(r'Plugins/GravityShift/Content/Python/v5/test_settings_save.py', encoding='utf-8').read())"
+
+# 建/修菜单关卡(幂等:已存在就打开并重设 GameMode)
+python $P "exec(open(r'Plugins/GravityShift/Content/Python/v5/create_menu_level.py', encoding='utf-8').read())"
+
+# PIE 在不在跑 / 当前关卡
+python $P "import unreal; print(unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).is_in_play_in_editor())"
+```
+
+⚠ **别用 `.claude/skills/` 下那份 `ue_pyexec.py`,用 `AgentSkill/ue-nocode/reference/` 的。** 前者是陈旧拷贝,临时文件路径硬编码 `C:\Users\20625\AppData\Local\Temp`(本机用户是 44429,这个目录根本不存在)→ **多行代码必崩** `FileNotFoundError`。单行(无换行且 ≤300 字符)走 `ExecuteStatement` 不落文件,所以只挂多行,很能骗人。仓库那份已用 `tempfile.gettempdir()`,同步一下就好:
+
+```bash
+cp AgentSkill/ue-nocode/reference/ue_pyexec.py .claude/skills/ue-nocode/reference/ue_pyexec.py
+```
+
+
+### 28.5 已知限制
+
+1. **编辑器 PIE 用的是当前打开的关卡**,不是 `GameDefaultMap`。所以要在编辑器里测菜单,**得先打开 `/Game/MainMenu`**。`EditorStartupMap` 保留 `/Game/测试案例` 是刻意的:改它会让每次开编辑器都进菜单关卡,影响日常做关卡。
+2. **新关卡不会自动继承菜单 GameMode**。GameMode 覆盖是逐关卡的,只有 `MainMenu.umap` 设了。哪天菜单搬到别的关卡,照着 `create_menu_level.py` 重跑一遍。
+3. `UGSSettingsWidget` **只画内容不带外壳**(暗底/居中由宿主给)。将来做游戏内暂停菜单可以直接复用;但要么套在 `UGSMainMenuWidget` 那种 Shell 里,要么自己给个壳。
+4. 灵敏度**只在 Pawn 的 `BeginPlay` 读一次存档**(`GSRollingBallPawn.cpp:114`),之后用成员缓存,不碰磁盘。游戏内改设置靠 `ApplyToLocalPawn` 直接写这个成员。**新加的 Pawn 或新关卡里的球要自己再读一次。**
+5. `bEnableNativePollingInput` 的关闭是挂在小球 Pawn 上的(`GSRollingBallPawn.cpp:772` 已有守卫)。菜单 `NativeDestruct` 里恢复成 true。**跨关卡时旧 Pawn 随世界销毁、新 Pawn 默认 true,所以不复原也不会卡输入**;但如果将来做"不换关卡就移除菜单"的场景(如游戏内暂停菜单),必须确认 `NativeDestruct` 确实跑到。
+6. 设置项目前只有一项。分辨率/音量/按键重映射都还没有,加的时候按 28.2 走。
+7. 菜单关卡是**空关卡**,背景纯黑,只有 UMG 的暗底(`0.02,0.02,0.03,0.94`)。要背景图/3D 场景就自己在关卡里摆。
+
+### 28.6 三个容易踩的实现坑(记下来省下次)
+
+1. **`FInputModeUIOnly` 拦不住 Tick 轮询输入。** 它只调 `GameViewportClient.SetIgnoreInput(true)`,不碰 `IgnoreMoveInput`/`IgnoreLookInput` 这类 PC 标志位。本项目的输入是 `PC->GetInputMouseDelta` + `IsInputKeyDown` 每帧拉的,所以菜单期间必须**显式关 Pawn 上的轮询开关**,否则鼠标照样转相机、WASD 照样推球。
+2. **纯 C++ 的 `UUserWidget` 没有 WidgetTree。** 蓝图生成类才带 tree;纯 C++ 的 `WidgetTree` 是空的,得在 `RebuildWidget()` 里 `NewObject<UWidgetTree>(this, TEXT("WidgetTree"), RF_Transient)` 自己建,再 `Tree->RootWidget = ...`。另外 `UUserWidget` 只声明了 `UUserWidget(const FObjectInitializer&)`,子类**不要**手写默认构造(会 C2512),要默认值就用类内初始化器。
+3. **空关卡的 WorldSettings 是懒创建的,`get_all_level_actors()` 看不见它。** 建菜单关卡时必须走 `unreal.World.get_world_settings()`。当时拿不到就 `spawn_actor_from_class` 兜底造了一个 —— 结果 PIE 报 `Warning: Extra World Settings '...WorldSettings_0' actor found... Destroying`,把 GameMode 覆盖一起带走,**症状是菜单关卡里照样生成滚球 Pawn、菜单不出现**。这个坑很阴:关卡文件本身看不出问题,只有 PIE 起来才发现。照抄 `create_menu_level.py` 别自己发挥。
+
+### 28.7 附:抓屏工具 `Saved/capture_editor_window.ps1`
+
+用来验"UMG 到底画出来没有、中文有没有豆腐块"。
+
+**`HighResShot` 抓不到 UMG** —— 它只抓场景。空菜单关卡 = 纯黑,两次截图字节完全相同(17709 B),`r.HighResScreenshotUI 1` 也没用。必须从桌面合成器抓:
+
+- 用 `g.CopyFromScreen`,不用 `PrintWindow`/`BitBlt` —— UE 是 D3D 窗口,后两者返回全黑
+- **文件必须 CRLF 行尾**。PS 5.1 的 here-string 认不出 LF,会把 C# 当 PS 脚本解析,报 `'using' 指令必须位于脚本中的任何命令之前`。用 Write 工具写完要转一道 CRLF
+- `Add-Type -ReferencedAssemblies System.Drawing` 不能省 —— `System.Drawing` 不在默认引用集,少了报"命名空间不存在类型"
+- 抓之前要 最小化→还原→`SetForegroundWindow`,否则后台进程抢不到前台,抓到的是**别人的窗口**
+- 别加 `-ExecutionPolicy Bypass`:会被安全策略拦,而且 CurrentUser 本来就是 RemoteSigned,本地脚本直接跑
+
+```bash
+powershell -NoProfile -File Saved\capture_editor_window.ps1 -Out Saved\Screenshots\x.png
+```
+
+⚠ **脚本刻意不做模拟点击。** 理由见 28.3 —— 抢不到前台时注入的点击会打到别人窗口上。**输入类验证交给人手。**
