@@ -81,6 +81,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "GravityShift")
 	void SetGravityDirectionOverride(FVector NewDirection);
 
+	// 新机制(2026-09-12):物体重力只剩 ±Z,由玩家瞄准点击切换。启用后本物体
+	// 不再跟随管理器提交的全局方向——玩家重力完全归转向器/关卡配置管,
+	// 物体重力只由准星机制改变,两者互不干扰。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
+	bool bUseOwnGravityDirection = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
+	FVector OwnGravityDirection = FVector(0.0, 0.0, -1.0);
+
+	UFUNCTION(BlueprintCallable, Category = "GravityShift")
+	void SetOwnGravityDirection(FVector NewDirection, bool bEnable = true);
+
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
 	FVector GetGravityDirection() const;
 

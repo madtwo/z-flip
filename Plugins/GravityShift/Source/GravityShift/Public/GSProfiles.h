@@ -90,10 +90,10 @@ public:
 	float CameraArmLengthCm = 700.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0"))
-	float CameraYawDegreesPerMouseUnit = 0.35f;
+	float CameraYawDegreesPerMouseUnit = 0.50f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0"))
-	float CameraPitchDegreesPerMouseUnit = 0.25f;
+	float CameraPitchDegreesPerMouseUnit = 0.35f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0"))
 	float MaximumCameraPitchDegrees = 70.0f;

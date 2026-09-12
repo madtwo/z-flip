@@ -7,6 +7,7 @@
 > **§15 = 2026-09-05 第九轮交付：§13/§14 拉取同步本机+重编 + 「积木式」对接文档(README 功能积木清单 / USAGE_WHITEBOX 文件存放规范+拾取钥匙门手册),手册摆法已实机 PIE 走通**;关卡策划对接入口 = README「功能积木清单」→ USAGE_WHITEBOX
 > **§25 = 2026-09-11 第十七轮交付：相机俯仰反转修复(鼠标上抬→相机上抬)+ 重力区域检测器系统(检测器/区域管理器两个新类,"禁用重力"= 停重力+清速度瞬间定住)**,UBT 编译通过 + PIE 7/7 全过;关卡侧拼装手册见 `AgentSkill/gs-gravity-zone-assembly/SKILL.md`,遗留:两个 Zone 数组按需求留空待后续 AI 按空间位置填
 > **§26 = 2026-09-12 第十八轮交付：「手感还原」交接——用户实机验收的最新手感(丝滑相机+球下1/3+平面加速度驱动)就是主线 `2c3c1a2` 的默认状态,谁都不用改任何参数;队友端"操作老版本"= dll 没重编(源码/资产都是新的)。还原步骤+手感验收清单+参数基准+禁改清单见 §26;PIE 调试 HUD 顶部新增 `GS build <编译时间>` 一行,一秒鉴定 dll 新旧**
+> **§27 = 2026-09-12 第十九轮交付：新重力机制(用户四条需求,实机验收通过)——①G/1/2/3 删除,物体重力只剩 ±Z;②玩家重力只由转向器圆弧控制;③按住右键出准星(TPS 聚焦+越肩+边缘微光)左键切换方块升/降;④导轨相机/重力开关退场,默认无导轨相机。组装手册 `AgentSkill/gs-aim-gravity-assembly/SKILL.md`;实现记录与两条泛用定式见 §27**
 > 写这份文档的目的：先把做到哪、卡在哪、改了什么、踩了什么雷同步清楚，供人工诊断。
 
 ---
@@ -947,3 +948,54 @@ print(b.get_editor_property("drive_acceleration_cm"),      # 期望 3600.0
 | `Private/GSFramework.cpp` | **新增**:PIE 调试 HUD 顶部一行 `GS build <编译日期 时间>`(`__DATE__ __TIME__`,即 dll 编译时刻)——"源码新但 dll 旧"的仲裁证据 |
 | `HANDOVER_zflip.md` | 本节(§26)+ 速览行 |
 | (前一轮已合入) | 你的 51f9c66 全部内容(俯仰修复/重力区域/FreezeMotion/拼装手册)已在 `2c3c1a2` 线上 |
+
+---
+
+## 27. 2026-09-12 第十八轮:新重力机制(准星改重力/玩家重力归转向器/无导轨相机)+ 用户实机验收通过 ✅
+
+> **需求(用户原话)**:①取消 1/2/3 改 XYZ,物体重力只剩 Z 轴(掉下来/升起来);②玩家重力只由圆弧装置控制;③物体重力由玩家按右键出准星瞄准、边缘发光、左键改变;④取消导轨相机,用刚验收的无导轨相机。全部在测试案例落地。
+
+### 27.1 交付了什么(按用户四条)
+
+1. **旧输入退场**:`FlipGravityKey(G)`、`AxisSetXKey/Y/Z(1/2/3)` 的 UPROPERTY、轮询与 `HandleFlipPressed/HandleSetGravityAxis` 整体删除(管理器 API 保留,转向器/落地反转还在用)。
+2. **物体重力 = 自有 ±Z**:`UGSGravityBodyComponent` 新增 `bUseOwnGravityDirection + OwnGravityDirection`(优先级:转向器过渡 override > 自有方向 > 管理器),`SetOwnGravityDirection()` 带唤醒;`AGSBlockBase` 新增 `bGravityRises`(false=掉/true=升),`ApplyCurrentConfiguration()` 里无条件应用 → **方块彻底与全局重力解耦**(玩家转向器提交/落地反转让方块纹丝不动,重力区域系统 `SetAffectedByGravity/FreezeMotion` 照常兼容)。`ToggleGravityZ()/SetGravityRises()` 供瞄准调用。
+3. **准星瞄准机制**(Pawn `UpdateAiming()`):按住 `AimKey(右键)` → 屏幕中心线探针(ECC_Visibility,`AimRangeCm=2500`,忽略自己)→ 锁定 `CanChangeGravity()` 的方块(`GSBlockBase + 模拟物理 + 重力启用`)→ `SetAimHighlight(true)` 边缘发光;左键(`AimFireKey`)= `ToggleGravityZ()`。HUD(`GSFramework`)按 `bAiming` 画准星,锁定变绿;提示行更新为新键位。
+4. **TPS 聚焦(ADS)**:`AimTargetFOV=55 / AimArmLengthCm=250 / AimZoomSpeed=8 / AimDriveScale=0.6 / AimShoulderOffsetCm=65` 全 UPROPERTY。聚焦时 FOV 收窄+臂长贴身+**越肩让位 65cm**(视线绕过球本体,抬头瞄天花板必备)+WASD 减速;灵敏度按 FOV 比开方衰减。**臂长直接写弹簧臂会被 UpdateCamera 探针每帧覆盖(白写)——只调 `AimArmLengthCm` 参数,别写 TargetArmLength**。
+5. **高亮 = Overlay 叠加材质**(v1 换槽位会把方块变黑,用户否决):`M_GS_RimGlow`(插件 Content,unlit+半透明+菲涅尔,发光×0.7/透明×0.6 微光),`SetAimHighlight` 走 `Mesh->SetOverlayMaterial`。
+6. **无导轨相机**:测试案例删除 `相机导轨_GS` 与 `GS_GravitySwitch`;基线灵敏度 Yaw 0.35→0.50、Pitch 0.25→0.35(GSProfiles.h)。地图新增两个可瞄准方块(GS_Block_Gravity (500,2150) / GS_Block_Breaker (500,2450),出生点附近)。
+
+### 27.2 用户实机迭代史(四轮反馈,全按"复现→定规则→回归")
+
+| 轮 | 反馈 | 修复 |
+|---|---|---|
+| 1 | 空间里没方块/瞄准要有 TPS 聚焦/灵敏度低一点 | 方块搬进转向器空间;ADS 五参数;灵敏度 0.5/0.35 |
+| 2 | 聚焦后灵敏度太低;抬头被球挡;**方块变黑不是发光** | 灵敏度改 FOV 比开方;加越肩偏移;高亮换 Overlay 材质 |
+| 3 | 抬头瞄准松右键,相机不连贯 | v1:臂长改走 CameraArmLengthCm 基线——**更糟,用户否决** |
+| 4 | **回到上一版**;真问题=松开后仍处于拉近状态,要动几下才恢复 | 精确回退 v3;加**快速回弹窗口**:解除瞄准后 1.2s 内探针放长不等 0.7s 驻留、速度×3 |
+
+**两条定式(泛用)**:①抬头"拉近"是防穿墙探针的物理必需(臂长 700 会怼进天花板),**别当 bug 修**;要修的是恢复速度。②相机臂长在无导轨下归 `UpdateCamera` 的探针+去弹管线管,**任何系统都别直接写 `CameraArm->TargetArmLength`**,要改走参数(`CameraArmLengthCm`/`AimArmLengthCm`)。
+
+### 27.3 验证
+
+- 脚本:`set_gravity_rises(True)` → 方块 z 59→850 顶棚稳住;`toggle_gravity_z()` → vz=-689 落下;管理器 rev 全程 0(解耦);转向器 2f 回归 riding→G=-Y progress 1.0;PIE 无新错误。
+- 用户实机:手感验收通过(含聚焦/越肩/微光/快速回弹,即当前工作树状态,dll 2026-09-12 16:41)。
+- Q/E 在无导轨相机下**暂不生效**(回退后保留旧实现,直写 TargetArmLength 被探针覆盖)——已知项,后续如要支持再走基线参数方案。
+
+### 27.4 文档(教另一头组装)
+
+- **`AgentSkill/gs-aim-gravity-assembly/SKILL.md`(新)**:机制/前置条件/摆什么/键位表/参数表/PIE 自验配方/六条坑。
+- `USAGE_WHITEBOX.md`:新机制章节 + 摆放表(GSBlockBase 瞄准注记;GravitySwitch/CameraRail 标弃用)+ 验证清单换新机制。
+- `README.md`:积木表三行更新 + 文档地图加新 skill + 关键参数表(三带 10/20/10、无导轨相机参数)。
+
+### 27.5 遗留
+
+- 准星/发光颜色现为绿色,用户未最终拍板,可调(`M_GS_RimGlow` 的 Constant3Vector)。
+- Q/E 无导轨调距待接(见 27.3)。
+- 队友侧:GravityZones 两个 Zone 数组仍待填;其旧关卡若摆了导轨相机不受影响(兼容保留)。
+
+### 27.6 同日补丁:箱子落地不弹 + 玩家推不动(用户需求,PIE 验证通过)
+
+- `AGSBlockBase` 新增两个 UPROPERTY(`ApplyCurrentConfiguration` 应用):
+  - `bZeroBounceOnLand=true`(默认开):零回弹物理材质覆盖(`Restitution=0 + CombineMode=Min`,§21 球上同款写法)——±Z 切换落下的箱子稳稳停住。实测:从天花板落下 vz 连续采样 -1116 → 落地后 **vz=0.0 四连采零反弹**。
+  - `bImmovableByPlayer=false`(按需开,两个演示箱已开)+ `ImmovableMassKg=2000`:质量方案(§20 同款)。自定义重力走 `bAccelChange`(质量无关加速度),**抬质量只影响被撞位移,±Z 升/降完全不受影响**。实测:球 900cm/s 连撞 4s,方块位移 **0.0cm**。
+- ⚠ **崩溃修复(重要教训)**:零回弹材质最初用函数级 `static UPhysicalMaterial*`,**静态指针不进 GC 引用图**——PIE 重启间隙被回收,下一局把悬空指针设进物理体,`BodyInstance.cpp` 直接断言崩编辑器(且悬空期接触解算被污染:方块以 ~60cm/s 爬行、无视重力切换)。修法:创建后 `AddToRoot()` + 悬空自愈重建。**凡函数级 static 持有 UObject,一律 AddToRoot**。

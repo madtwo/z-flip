@@ -123,7 +123,23 @@ FVector UGSGravityBodyComponent::GetGravityDirection() const
 	{
 		return GravityDirectionOverride.GetSafeNormal();
 	}
+	// 物体自有 ±Z 重力(玩家准星机制):优先于管理器,不受全局转向影响。
+	if (bUseOwnGravityDirection)
+	{
+		return OwnGravityDirection.GetSafeNormal();
+	}
 	return GravityManager ? GravityManager->GetGravityDirection() : FVector(0.0, 0.0, -1.0);
+}
+
+void UGSGravityBodyComponent::SetOwnGravityDirection(FVector NewDirection, bool bEnable)
+{
+	bUseOwnGravityDirection = bEnable;
+	OwnGravityDirection = NewDirection.GetSafeNormal();
+	// 睡眠中的刚体不会响应方向变化,唤醒它(掉下来/升起来要立刻开始)。
+	if (TargetPrimitive && IsSimulatingTarget())
+	{
+		TargetPrimitive->WakeRigidBody();
+	}
 }
 
 void UGSGravityBodyComponent::SetGravityDirectionOverride(FVector NewDirection)

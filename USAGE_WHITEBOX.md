@@ -42,8 +42,8 @@ Content 目录按功能分域,**游戏积木资产(C++ 类的 BP 壳/DA)只进 `
 
 | 类 | 摆哪 | 关键配置(细节面板) |
 |---|---|---|
-| `GSBlockBase` | 每个可动方块 | `BlockProfile` 选 DA;`bStartSimulatingPhysics`(可动=true)/`bAffectedByGravity`=true;可破坏块再开 `bBreakable`+`bUseContinuousCollisionDetection` |
-| `GSGravitySwitch` | 开关位 | `bTriggerOnOverlap=true`(球滚过触发);或关掉用 E 交互;`SwitchMode=TOGGLE` |
+| `GSBlockBase` | 每个可动方块 | `BlockProfile` 选 DA;`bStartSimulatingPhysics`(可动=true)/`bAffectedByGravity`=true;可破坏块再开 `bBreakable`+`bUseContinuousCollisionDetection`。**勾了模拟物理的方块就是准星瞄准目标**(2026-09-12 新机制,见下节) |
+| ~~`GSGravitySwitch`~~ | **已退场(2026-09-12)**:玩家重力只由转向器圆弧改变,新关卡不要摆 | 类保留兼容旧关 |
 | `GSSurfaceModifierVolume` | 包住慢/加速表面 | `VolumeExtent` 贴合白盒表面(薄薄一层);`ProfileA`=DA_GS_Surface_Slow / Fast;重叠取优先级不叠加 |
 | `GSLandingResponseVolume` | 特殊落地区 | 覆盖落点区域(弹跳增强/抑制) |
 | `GSKillVolume` | **房间上、下边界外各一个** | `VolumeExtent` 覆盖整个房间截面——重力会翻转,上下漏出去都要能重置 |
@@ -52,9 +52,9 @@ Content 目录按功能分域,**游戏积木资产(C++ 类的 BP 壳/DA)只进 `
 | `GSPickupItem` | 想让玩家捡的任何东西 | `PickupMessage` 填提示文案;留空=静默拾取 |
 | `GSKey` | 钥匙 | `KeyID` 填名字(如 `red`)——捡到即解锁全图同 ID 的门 |
 | `GSDoor` | 锁住的门 | `RequiredKeyID` 填对应钥匙的 KeyID;`SlideOffset`/`SlideDuration` 定滑开动作 |
-| `GSCameraRail` | **每段相机导轨一根**(不摆则该关回落到旧跟随相机) | 细节见下节「相机导轨」;测试案例已有一根 `相机导轨_GS` |
+| `GSCameraRail` | **已弃用(2026-09-12 新机制)**:新关卡一律**不摆**,走无导轨相机(丝滑+球下1/3+TPS 聚焦,见下节);旧关保留兼容 | 见下节「相机导轨(旧机制)」 |
 
-### 相机导轨(新式防晕相机,2026-09-03)
+### 相机导轨(旧机制,2026-09-03;新关卡默认不摆)
 
 原理:相机像**套在钢筋上的小环**——沿 `GSCameraRail` 的本地 Z 轴滑动跟随球,在横切面里的位置全程锁死;视角以**世界竖直为滚转基准**、只做小幅万向调整(偏航 ≤35°/俯仰 ≤50°,可调),随球上墙/上天花板自动微调俯仰,**重力翻转不再滚转整个画面**。
 
@@ -66,6 +66,13 @@ Content 目录按功能分域,**游戏积木资产(C++ 类的 BP 壳/DA)只进 `
 5. 多段导轨直接首尾相接摆即可——组件自动选最近导轨、带 150cm 迟滞防抖,球出了所有导轨范围自动回落旧跟随相机
 
 测试案例现状:圆柱体参考件 `相机导轨`(无碰撞/游戏不显示)保留作视觉参照,旁边已摆好对应的 `相机导轨_GS`(轴线沿 X、长 6293、朝 −X 看进房间)。
+
+### 准星改重力 + 无导轨相机(新机制,2026-09-12,取代 G/1/2/3/导轨相机/重力开关)
+
+- **玩家重力**:只由**转向器圆弧**改变(滚进滑梯自动滑上连接面);G/1/2/3 已删除。
+- **物体重力**:每个可动方块只有 **±Z(掉下来/升起来)**,不再跟随全局重力;玩家**按住右键**出现准星+聚焦(FOV 收窄/相机贴近/越肩让位),可瞄准方块**边缘绿光**,**左键**切换升/降。固定块瞄不中。
+- **无导轨相机**:新关卡**不要摆** `GS Camera Rail`——默认就是丝滑无导轨相机(球在画面下 1/3,鼠标俯仰可用)。
+- 组装细节、参数表、PIE 自验配方:**`AgentSkill/gs-aim-gravity-assembly/SKILL.md`**。
 
 方块 Profile 三配方:`DA_GS_Block_Fixed`(定死)/`DA_GS_Block_Gravity`(随重力)/`DA_GS_Block_GravityBreaker`(撞击破坏者,CCD 已开)。赋完 Profile 调 `ApplyBlockProfile`(细节面板按钮或脚本调)生效。
 
@@ -121,8 +128,9 @@ kv.set_volume_extent(unreal.Vector(12000, 12000, 300))
 
 1. PIE 无编译错误/Accessed None(日志:`Saved/Logs/`)
 2. 球从 PlayerStart 落地;WASD 方向与相机一致;松键 ~0.5s 停
-3. G:球+可动方块直上直下贴住天花板(无翻滚);摄像机 180° 跟转;再按 G 回来
-4. 中高落差:弹一次就稳(不无限弹)
-5. (配了 KillVolume)掉出边界自动重置
-6. (配了钥匙/门)拾钥匙门滑开;R 重置后门回锁、拾取物复原
-7. 最终让真人玩一遍——按键手感只有人能判断
+3. 右键瞄准:准星出现+相机聚焦;锁可动方块边缘绿光;左键方块升/降;固定块锁不中(2026-09-12 新机制)
+4. 玩家滚转向器圆弧:自动滑上连接面、重力平滑转;**方块不跟着翻**
+5. 中高落差:弹一次就稳(不无限弹)
+6. (配了 KillVolume)掉出边界自动重置
+7. (配了钥匙/门)拾钥匙门滑开;R 重置后门回锁、拾取物复原
+8. 最终让真人玩一遍——按键手感只有人能判断

@@ -12,6 +12,7 @@ class UGSGravityBodyComponent;
 class UGSGridSnapComponent;
 class UGSResettableComponent;
 class UGSSurfaceReceiverComponent;
+class UMaterialInterface;
 class UStaticMesh;
 class UStaticMeshComponent;
 
@@ -59,6 +60,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	bool bUseContinuousCollisionDetection = false;
 
+	/** 落地不弹:零回弹物理材质覆盖(Combine=Min),±Z 切换落下时稳稳停住。默认开。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
+	bool bZeroBounceOnLand = true;
+
+	/** 玩家推不动:质量抬到 ImmovableMassKg(自定义重力是质量无关加速度,±Z 切换不受影响)。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
+	bool bImmovableByPlayer = false;
+
+	/** 推不动方案采用的质量(kg),玩家球撞上去几乎不产生位移。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift", meta = (ClampMin = "1.0"))
+	float ImmovableMassKg = 2000.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift", meta = (ClampMin = "0.0"))
 	float GravityScale = 1.0f;
 
@@ -76,6 +89,15 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	FName BindingSourceWhiteboxId = NAME_None;
+
+	// 新机制(2026-09-12):物体重力只剩 ±Z。false=向下掉,true=向上飘;
+	// 由玩家准星(RMB 瞄准 + LMB)切换,加载时经 ApplyCurrentConfiguration 应用。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
+	bool bGravityRises = false;
+
+	// 准星瞄准时的"边缘发光"覆盖材质(半透明菲涅尔);空则无高亮。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "GravityShift")
+	TObjectPtr<UMaterialInterface> AimGlowMaterial = nullptr;
 
 	UFUNCTION(BlueprintCallable, Category = "GravityShift")
 	void ApplyBlockProfile(UGSBlockProfile* NewProfile);
@@ -103,5 +125,23 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "GravityShift")
 	void ApplyCurrentConfiguration();
 
+	// 能否被准星改成 ±Z 重力:有 GravityBody 且正在模拟物理(固定块不可改)。
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
+	bool CanChangeGravity() const;
+
+	UFUNCTION(BlueprintCallable, Category = "GravityShift")
+	void SetGravityRises(bool bRises);
+
+	// 掉下来 ↔ 升起来。返回切换后的 bGravityRises。
+	UFUNCTION(BlueprintCallable, Category = "GravityShift")
+	bool ToggleGravityZ();
+
+	// 准星瞄准高亮(边缘发光):换上 AimGlowMaterial,离开时恢复原材质。
+	UFUNCTION(BlueprintCallable, Category = "GravityShift")
+	void SetAimHighlight(bool bOn);
+
 	virtual void BeginPlay() override;
+
+protected:
+	bool bAimHighlightOn = false;
 };

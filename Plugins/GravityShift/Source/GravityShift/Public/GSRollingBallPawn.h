@@ -12,6 +12,7 @@ class AGSGravityManager;
 class AGSWorldStateManager;
 class UCameraComponent;
 class UGSBallProfile;
+class AGSBlockBase;
 class UGSGravityBodyComponent;
 class UGSLandingProfile;
 class UGSLandingResponseComponent;
@@ -103,8 +104,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
 	FKey RightKey = EKeys::D;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
-	FKey FlipGravityKey = EKeys::G;
+	// 旧 G 翻转已移除(2026-09-12 新机制):玩家重力只由转向器圆弧控制。
 
 	// CameraPivot location is written in world space and does NOT inherit the
 	// physics ball's intra-frame displacement (that bypasses all camera smoothing
@@ -164,15 +164,51 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
 	FKey ResetKey = EKeys::R;
 
-	// Set-axis keys: snap gravity to the positive direction of the pressed axis.
+	// —— 新瞄准机制(2026-09-12):按住右键出现准星,可改变重力的物体边缘发光,
+	// 左键把它的重力在 掉下来/升起来(±Z) 之间切换。取代旧的 G/1/2/3。 ——
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
-	FKey AxisSetXKey = EKeys::One;
+	FKey AimKey = EKeys::RightMouseButton;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
-	FKey AxisSetYKey = EKeys::Two;
+	FKey AimFireKey = EKeys::LeftMouseButton;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
-	FKey AxisSetZKey = EKeys::Three;
+	// 准星射线最长距离(cm),超出的物体瞄不到。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input", meta = (ClampMin = "100.0"))
+	float AimRangeCm = 2500.0f;
+
+	// 是否正按住右键瞄准(HUD 据此画准星)。
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "GravityShift|Input")
+	bool bAiming = false;
+
+	// 当前准星锁定的可改变重力方块(未锁定为 null)。
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "GravityShift|Input")
+	TObjectPtr<AGSBlockBase> AimedBlock = nullptr;
+
+	// 无导轨相机的 Q/E 调距:每按一次的步长与范围(clamp)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "10.0"))
+	float CameraDistanceStepCm = 60.0f;
+
+	// —— 瞄准聚焦(TPS ADS 手感,2026-09-12) ——
+	// 瞄准时相机 FOV 收到这个值(越小越"聚焦")。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Aim", meta = (ClampMin = "30.0", ClampMax = "110.0"))
+	float AimTargetFOV = 55.0f;
+
+	// 瞄准时相机臂长收到这个值(贴近肩后),松开右键恢复 Q/E 设定的距离。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Aim", meta = (ClampMin = "120.0"))
+	float AimArmLengthCm = 250.0f;
+
+	// FOV/臂长向目标收敛的速度(每秒插值系数)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Aim", meta = (ClampMin = "1.0"))
+	float AimZoomSpeed = 8.0f;
+
+	// 瞄准时 WASD 驱动力缩放(聚焦时移动放慢,更好瞄准)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Aim", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float AimDriveScale = 0.6f;
+
+	// 越肩偏移(cm):瞄准时相机沿屏幕右方向让开,视线绕过球本体
+	// (否则抬头瞄天花板上的方块会被球挡住)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Aim", meta = (ClampMin = "0.0"))
+	float AimShoulderOffsetCm = 65.0f;
 
 	// How long the "X轴不可用" hint stays on screen after a disallowed 1/2/3 press.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input", meta = (ClampMin = "0.0"))
@@ -419,16 +455,14 @@ protected:
 	FQuat CurrentCameraRotation = FQuat::Identity;
 	bool bCameraRotationReady = false;
 	bool bRailCamActive = false;
-	bool bFlipKeyWasDown = false;
 	bool bInteractKeyWasDown = false;
 	bool bResetKeyWasDown = false;
 	bool bTrailCloserKeyWasDown = false;
 	bool bTrailFartherKeyWasDown = false;
 	bool bSpeedDownKeyWasDown = false;
 	bool bSpeedUpKeyWasDown = false;
-	bool bAxisSetXWasDown = false;
-	bool bAxisSetYWasDown = false;
-	bool bAxisSetZWasDown = false;
+	bool bAimKeyWasDown = false;
+	bool bAimFireKeyWasDown = false;
 	bool bDismissKeyWasDown = false;
 
 	bool bInputLocked = false;
@@ -437,6 +471,13 @@ protected:
 	float AxisHintExpireTime = -1.0f;
 	FString AxisHintText;
 
+	// ADS 状态:非瞄准时的臂长基线(Q/E 改动实时反映进来)与开局 FOV 基线。
+	float NonAimArmLengthCm = 0.0f;
+	float DefaultCameraFOV = 0.0f;
+	// 瞄准解除后的"快速回弹窗口"(世界秒):窗口内探针放长不等驻留、速度×3,
+	// 解决"抬头瞄准松开后仍贴着拉近状态"的问题。
+	float FastArmExtendUntilSeconds = -1.0f;
+
 	FQuat BuildCameraRotation(const FVector& UpVector, float AdditionalPitchDegrees = 0.0f) const;
 	// 世界航向(单位向量):无导轨相机的水平瞄准方向。鼠标转向绕当前重力上轴旋转它,
 	// G 翻转(上轴 ±Z 互换)不改变航向 → 视角翻转后仍对准同一个世界方向。
@@ -444,8 +485,10 @@ protected:
 	void UpdateCamera(float DeltaSeconds);
 	void ApplyMovement(float DeltaSeconds);
 	void PollNativeInput();
-	void HandleFlipPressed();
-	void HandleSetGravityAxis(EGSGravityAxis Axis);
+	// 新瞄准机制:每 tick 更新 RMB 瞄准状态/中心射线/高亮切换;锁定时左键翻转方块重力。
+	void UpdateAiming();
+	// 无导轨相机的 Q/E 调距(有轨相机时 Q/E 仍走轨相机,不进这里)。
+	void AdjustCameraDistance(float DirectionSign);
 	void ShowAxisDisabledHint(EGSGravityAxis Axis);
 	AActor* FindBestInteractable() const;
 

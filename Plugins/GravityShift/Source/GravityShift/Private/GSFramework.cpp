@@ -205,7 +205,7 @@ void AGSGravityHUD::DrawHUD()
 
 	if (bShowControls)
 	{
-		Lines.Add(TEXT("WASD roll  |  G flip  |  1/2/3 set X/Y/Z  |  Q/E camera dist  |  O/P speed  |  F interact  |  R reset"));
+		Lines.Add(TEXT("WASD roll  |  RMB aim / LMB flip object gravity  |  Q/E camera dist  |  O/P speed  |  F interact  |  R reset"));
 	}
 
 	float Y = StartPosition.Y;
@@ -214,5 +214,17 @@ void AGSGravityHUD::DrawHUD()
 	{
 		Canvas->DrawText(GEngine->GetMediumFont(), Line, StartPosition.X, Y, 1.0f, 1.0f);
 		Y += LineHeight;
+	}
+
+	// 准星(新瞄准机制):按住右键出现;锁到可改变重力的方块变绿。
+	if (Ball->bAiming)
+	{
+		const bool bLocked = Ball->AimedBlock != nullptr;
+		Canvas->SetDrawColor(bLocked ? 130 : 240, bLocked ? 255 : 240, bLocked ? 180 : 240, 220);
+		const FVector2D Center(Canvas->SizeX * 0.5f, Canvas->SizeY * 0.5f);
+		Canvas->K2_DrawLine(Center + FVector2D(-16.0f, 0.0f), Center + FVector2D(-5.0f, 0.0f), 2.0f);
+		Canvas->K2_DrawLine(Center + FVector2D(5.0f, 0.0f), Center + FVector2D(16.0f, 0.0f), 2.0f);
+		Canvas->K2_DrawLine(Center + FVector2D(0.0f, -16.0f), Center + FVector2D(0.0f, -5.0f), 2.0f);
+		Canvas->K2_DrawLine(Center + FVector2D(0.0f, 5.0f), Center + FVector2D(0.0f, 16.0f), 2.0f);
 	}
 }

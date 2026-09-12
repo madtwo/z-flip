@@ -1,6 +1,7 @@
 #include "GSBlockBase.h"
 
 #include "Components/StaticMeshComponent.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 #include "UObject/ConstructorHelpers.h"
 
 #include "GSBreakableComponent.h"
@@ -23,6 +24,13 @@ AGSBlockBase::AGSBlockBase()
 	if (CubeAsset.Succeeded())
 	{
 		Mesh->SetStaticMesh(CubeAsset.Object);
+	}
+
+	// 准星瞄准的"边缘发光"覆盖材质(由安装脚本生成在插件 Content)。
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> RimGlowAsset(TEXT("/GravityShift/Materials/M_GS_RimGlow.M_GS_RimGlow"));
+	if (RimGlowAsset.Succeeded())
+	{
+		AimGlowMaterial = RimGlowAsset.Object;
 	}
 
 	GravityBody = CreateDefaultSubobject<UGSGravityBodyComponent>(TEXT("GravityBody"));
@@ -130,6 +138,38 @@ void AGSBlockBase::FreezeMotion()
 	Mesh->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
 }
 
+bool AGSBlockBase::CanChangeGravity() const
+{
+	return GravityBody && Mesh && Mesh->IsSimulatingPhysics() && GravityBody->bGravityEnabled;
+}
+
+void AGSBlockBase::SetGravityRises(bool bRises)
+{
+	bGravityRises = bRises;
+	if (GravityBody)
+	{
+		GravityBody->SetOwnGravityDirection(FVector(0.0, 0.0, bRises ? 1.0 : -1.0), true);
+	}
+}
+
+bool AGSBlockBase::ToggleGravityZ()
+{
+	SetGravityRises(!bGravityRises);
+	return bGravityRises;
+}
+
+void AGSBlockBase::SetAimHighlight(bool bOn)
+{
+	if (!Mesh || bOn == bAimHighlightOn)
+	{
+		return;
+	}
+	// 用 Overlay 叠加材质而不是换槽位:方块原材质完全保留,只有边缘微微发光
+	// (v1 换槽位会把方块本体变成黑色半透明,用户不要)。
+	Mesh->SetOverlayMaterial(bOn ? AimGlowMaterial.Get() : nullptr);
+	bAimHighlightOn = bOn;
+}
+
 void AGSBlockBase::SetCanBreakTargets(bool bCanBreak)
 {
 	bCanBreakTargets = bCanBreak;
@@ -155,9 +195,29 @@ void AGSBlockBase::ApplyCurrentConfiguration()
 		Mesh->SetSimulatePhysics(bStartSimulatingPhysics);
 		Mesh->SetEnableGravity(false);
 		Mesh->SetUseCCD(bUseContinuousCollisionDetection);
-		if (bStartSimulatingPhysics && MassOverrideKg > 0.0f)
+		// 落地不弹:零回弹覆盖(Combine=Min,对面材质再弹也取最小)——
+		// ±Z 切换落下的箱子要稳稳停住,不是弹球。
+		// ⚠ 函数级静态指针不进 GC 引用图:PIE 重启间隙材质可能被回收,
+		// 下局设悬空 override 会触发 BodyInstance 断言崩溃(实测)——必须 AddToRoot。
+		if (bZeroBounceOnLand)
 		{
-			Mesh->SetMassOverrideInKg(NAME_None, MassOverrideKg, true);
+			static UPhysicalMaterial* ZeroBounceMat = nullptr;
+			if (!ZeroBounceMat || !ZeroBounceMat->IsValidLowLevel())
+			{
+				ZeroBounceMat = NewObject<UPhysicalMaterial>(GetTransientPackage(), TEXT("GSBlockZeroBounce"));
+				ZeroBounceMat->Restitution = 0.0f;
+				ZeroBounceMat->bOverrideRestitutionCombineMode = true;
+				ZeroBounceMat->RestitutionCombineMode = EFrictionCombineMode::Min;
+				ZeroBounceMat->AddToRoot();
+			}
+			Mesh->SetPhysMaterialOverride(ZeroBounceMat);
+		}
+		// 玩家推不动:质量方案(§20 同款)。自定义重力走 bAccelChange(质量无关),
+		// 抬质量只影响被撞时的位移,不影响 ±Z 切换的升/降。
+		const float EffectiveMassKg = bImmovableByPlayer ? FMath::Max(MassOverrideKg, ImmovableMassKg) : MassOverrideKg;
+		if (bStartSimulatingPhysics && EffectiveMassKg > 0.0f)
+		{
+			Mesh->SetMassOverrideInKg(NAME_None, EffectiveMassKg, true);
 		}
 	}
 
@@ -171,6 +231,10 @@ void AGSBlockBase::ApplyCurrentConfiguration()
 		GravityBody->BaseImpactEnergyMultiplier = ImpactEnergyMultiplier;
 		GravityBody->ImpactSourceTag = ImpactSourceTag;
 		GravityBody->bCanBreakTargets = bCanBreakTargets;
+		// 新机制:物体重力恒为 ±Z(方向由 bGravityRises 定),不再跟随管理器
+		// 提交的全局方向——玩家转向器/落地反转不再带动方块,方块重力只由
+		// 准星瞄准+左键改变(掉下来 ↔ 升起来)。
+		GravityBody->SetOwnGravityDirection(FVector(0.0, 0.0, bGravityRises ? 1.0 : -1.0), true);
 		GravityBody->RefreshReferences();
 	}
 

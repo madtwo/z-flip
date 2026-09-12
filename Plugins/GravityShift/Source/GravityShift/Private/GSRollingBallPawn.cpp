@@ -10,6 +10,7 @@
 #include "GameFramework/SpringArmComponent.h"
 #include "UObject/ConstructorHelpers.h"
 
+#include "GSBlockBase.h"
 #include "GSGravityBodyComponent.h"
 #include "GSGravityManager.h"
 #include "GSInteractable.h"
@@ -578,10 +579,14 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 	else
 	{
 		ProbeClearSeconds += DeltaSeconds;
-		if (ProbeClearSeconds > ArmExtendHoldSeconds)
+		// 瞄准解除后的 1.2s 内走"快速回弹":不等 0.7s 驻留、放长速度 ×3,
+		// 松开右键后视线一离开天花板/墙就立刻回到正常距离。
+		const bool bFastExtend = GetWorld() && GetWorld()->GetTimeSeconds() < FastArmExtendUntilSeconds;
+		if (ProbeClearSeconds > (bFastExtend ? 0.0f : ArmExtendHoldSeconds))
 		{
 			SmoothedArmLengthCm = FMath::FInterpTo(SmoothedArmLengthCm, CameraArmLengthCm, DeltaSeconds,
-				FMath::Max(ArmLengthInterpSpeed, 0.1f));
+				bFastExtend ? FMath::Max(ArmLengthInterpSpeed * 3.0f, 12.0f)
+					: FMath::Max(ArmLengthInterpSpeed, 0.1f));
 		}
 	}
 	CameraArm->TargetArmLength = SmoothedArmLengthCm;
@@ -737,7 +742,7 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 		// 接触下大量打滑(实测 ω·r≈3000 而 |v|≈240),滚动力矩转化不成位移,终端速度
 		// 被切向拖拽死锁在 ~335。平面加速度绕开牵引耦合,终端 = DriveAccel/切向拖拽,
 		// 只作用于 WASD 路径;重力/掉落完全不走这里。
-		BallCollision->AddForce(Desired * DriveAccelerationCm, NAME_None, true);
+		BallCollision->AddForce(Desired * DriveAccelerationCm * (bAiming ? AimDriveScale : 1.0f), NAME_None, true);
 	}
 	else if (bAllowAirControl)
 	{
@@ -776,16 +781,24 @@ void AGSRollingBallPawn::PollNativeInput()
 	PC->GetInputMouseDelta(MouseX, MouseY);
 	// Rail mode owns the camera; accumulated mouse offsets only apply to the
 	// chase rig, otherwise they would suddenly apply on the next rail handoff.
-	if (!RailCamera || !RailCamera->IsDriving())
-	{
-		if (!FMath::IsNearlyZero(MouseX) || !FMath::IsNearlyZero(MouseY))
+		if (!RailCamera || !RailCamera->IsDriving())
 		{
-			// Pitch 不取反:BuildCameraRotation 里 CameraPitchDegrees 是正值=抬头,
-			// 而 UE 的鼠标 delta Y 上抬为正,所以直接把 MouseY 加进去就是"鼠标上抬
-			// → 相机上抬"。旧实现的 -MouseY 让俯仰和偏航反号,只有上下是反的。
-			AddCameraLookInput(MouseX * CameraYawDegreesPerMouseUnit, MouseY * CameraPitchDegreesPerMouseUnit);
+			if (!FMath::IsNearlyZero(MouseX) || !FMath::IsNearlyZero(MouseY))
+			{
+				// Pitch 不取反:BuildCameraRotation 里 CameraPitchDegrees 是正值=抬头,
+				// 而 UE 的鼠标 delta Y 上抬为正,所以直接把 MouseY 加进去就是"鼠标上抬
+				// → 相机上抬"。旧实现的 -MouseY 让俯仰和偏航反号,只有上下是反的。
+				// 聚焦(ADS)时灵敏度按 FOV 比的开方衰减:有一点"聚焦变稳",
+				// 但不会低到发木(全比例衰减实测太钝,用户反馈)。
+				float SensScale = 1.0f;
+				if (Camera && DefaultCameraFOV > 1.0f)
+				{
+					SensScale = FMath::Sqrt(Camera->FieldOfView / DefaultCameraFOV);
+				}
+				AddCameraLookInput(MouseX * CameraYawDegreesPerMouseUnit * SensScale,
+					MouseY * CameraPitchDegreesPerMouseUnit * SensScale);
+			}
 		}
-	}
 
 	const float AxisX = (PC->IsInputKeyDown(RightKey) ? 1.0f : 0.0f) - (PC->IsInputKeyDown(LeftKey) ? 1.0f : 0.0f);
 	const float AxisY = (PC->IsInputKeyDown(ForwardKey) ? 1.0f : 0.0f) - (PC->IsInputKeyDown(BackwardKey) ? 1.0f : 0.0f);
@@ -797,12 +810,8 @@ void AGSRollingBallPawn::PollNativeInput()
 		SetMoveInput(FVector2D(0.0f, 1.0f));
 	}
 
-	const bool bFlipDown = PC->IsInputKeyDown(FlipGravityKey);
-	if (bFlipDown && !bFlipKeyWasDown)
-	{
-		HandleFlipPressed();
-	}
-	bFlipKeyWasDown = bFlipDown;
+	// 新瞄准机制(RMB 瞄准 + LMB 翻转方块重力),取代旧的 G/1/2/3。
+	UpdateAiming();
 
 	const bool bInteractDown = PC->IsInputKeyDown(InteractKey);
 	if (bInteractDown && !bInteractKeyWasDown)
@@ -819,12 +828,17 @@ void AGSRollingBallPawn::PollNativeInput()
 	bResetKeyWasDown = bResetDown;
 
 	// Player camera-distance keys: each press steps the rail camera's trail.
+	// 无轨相机(新机制默认)时改调弹簧臂距离。
 	const bool bTrailCloserDown = PC->IsInputKeyDown(TrailCloserKey);
 	if (bTrailCloserDown && !bTrailCloserKeyWasDown)
 	{
 		if (RailCamera)
 		{
 			RailCamera->AdjustTrailDistance(-1.0f);
+		}
+		else
+		{
+			AdjustCameraDistance(-1.0f);
 		}
 	}
 	bTrailCloserKeyWasDown = bTrailCloserDown;
@@ -835,6 +849,10 @@ void AGSRollingBallPawn::PollNativeInput()
 		if (RailCamera)
 		{
 			RailCamera->AdjustTrailDistance(1.0f);
+		}
+		else
+		{
+			AdjustCameraDistance(1.0f);
 		}
 	}
 	bTrailFartherKeyWasDown = bTrailFartherDown;
@@ -853,28 +871,6 @@ void AGSRollingBallPawn::PollNativeInput()
 		AdjustDriveSpeed(1.0f);
 	}
 	bSpeedUpKeyWasDown = bSpeedUpDown;
-
-	// Set-axis keys 1/2/3 snap gravity to the positive direction of that axis.
-	const bool bAxisSetXDown = PC->IsInputKeyDown(AxisSetXKey);
-	if (bAxisSetXDown && !bAxisSetXWasDown)
-	{
-		HandleSetGravityAxis(EGSGravityAxis::X);
-	}
-	bAxisSetXWasDown = bAxisSetXDown;
-
-	const bool bAxisSetYDown = PC->IsInputKeyDown(AxisSetYKey);
-	if (bAxisSetYDown && !bAxisSetYWasDown)
-	{
-		HandleSetGravityAxis(EGSGravityAxis::Y);
-	}
-	bAxisSetYWasDown = bAxisSetYDown;
-
-	const bool bAxisSetZDown = PC->IsInputKeyDown(AxisSetZKey);
-	if (bAxisSetZDown && !bAxisSetZWasDown)
-	{
-		HandleSetGravityAxis(EGSGravityAxis::Z);
-	}
-	bAxisSetZWasDown = bAxisSetZDown;
 }
 
 void AGSRollingBallPawn::Tick(float DeltaSeconds)
@@ -972,14 +968,125 @@ void AGSRollingBallPawn::AddCameraLookInput(float YawDeltaDegrees, float PitchDe
 	CameraPitchDegrees = FMath::Clamp(CameraPitchDegrees + PitchDeltaDegrees, -MaximumCameraPitchDegrees, MaximumCameraPitchDegrees);
 }
 
-void AGSRollingBallPawn::HandleFlipPressed()
+void AGSRollingBallPawn::UpdateAiming()
 {
-	// 转向器滑行期间忽略 G:过渡由转向器接管,中途打断会让方向与弯道脱节。
-	if (bGravityRedirectActive)
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (!PC)
 	{
 		return;
 	}
-	RequestManualGravityFlip();
+
+	const bool bAimDown = PC->IsInputKeyDown(AimKey);
+	if (bAimDown != bAiming)
+	{
+		bAiming = bAimDown;
+		// 进/出聚焦的瞬间:记录非瞄准臂长基线(Q/E 随时改动都算数);
+		// 解除瞄准时开 1.2s"快速回弹窗口",探针一离开天花板/墙就迅速放长。
+		if (bAiming && CameraArm)
+		{
+			NonAimArmLengthCm = CameraArm->TargetArmLength;
+		}
+		if (!bAiming && GetWorld())
+		{
+			FastArmExtendUntilSeconds = GetWorld()->GetTimeSeconds() + 1.2f;
+		}
+		if (!bAiming && AimedBlock)
+		{
+			AimedBlock->SetAimHighlight(false);
+			AimedBlock = nullptr;
+		}
+	}
+
+	// TPS 聚焦(ADS):FOV 收窄 + 臂长贴近 + 越肩让位,全部平滑插值。
+	// 仅无导轨相机时生效。臂长直接写 TargetArmLength 会被探针每帧覆盖——
+	// 实际生效的拉近来自防穿墙探针(天花板/墙边自动收缩),这是设计行为;
+	// 松开后的恢复速度由"快速回弹窗口"(FastArmExtendUntilSeconds)保证。
+	if (Camera && CameraArm && (!RailCamera || !RailCamera->IsDriving()))
+	{
+		if (DefaultCameraFOV <= 1.0f)
+		{
+			DefaultCameraFOV = Camera->FieldOfView;
+		}
+		const float Dt = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.016f;
+		const float TargetFOV = bAiming ? AimTargetFOV : DefaultCameraFOV;
+		const float TargetArm = bAiming ? AimArmLengthCm
+			: (NonAimArmLengthCm > 1.0f ? NonAimArmLengthCm : CameraArm->TargetArmLength);
+		const float TargetShoulder = bAiming ? AimShoulderOffsetCm : 0.0f;
+		Camera->FieldOfView = FMath::FInterpTo(Camera->FieldOfView, TargetFOV, Dt, AimZoomSpeed);
+		CameraArm->TargetArmLength = FMath::FInterpTo(CameraArm->TargetArmLength, TargetArm, Dt, AimZoomSpeed);
+		FVector Socket = CameraArm->SocketOffset;
+		Socket.Y = FMath::FInterpTo(Socket.Y, TargetShoulder, Dt, AimZoomSpeed);
+		CameraArm->SocketOffset = Socket;
+	}
+
+	bAimKeyWasDown = bAimDown;
+	if (!bAiming)
+	{
+		return;
+	}
+
+	// 屏幕中心射线 = 相机视线。
+	FVector CamLoc = FVector::ZeroVector;
+	FRotator CamRot = FRotator::ZeroRotator;
+	PC->GetPlayerViewPoint(CamLoc, CamRot);
+
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(GSAimTrace), false);
+	Params.AddIgnoredActor(this);
+	const FVector End = CamLoc + CamRot.Vector() * AimRangeCm;
+	const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, CamLoc, End, ECC_Visibility, Params);
+
+	AGSBlockBase* NewAim = nullptr;
+	if (bHit)
+	{
+		NewAim = Cast<AGSBlockBase>(Hit.GetActor());
+		if (NewAim && !NewAim->CanChangeGravity())
+		{
+			NewAim = nullptr;
+		}
+	}
+
+	if (NewAim != AimedBlock)
+	{
+		if (AimedBlock)
+		{
+			AimedBlock->SetAimHighlight(false);
+		}
+		AimedBlock = NewAim;
+		if (AimedBlock)
+		{
+			AimedBlock->SetAimHighlight(true);
+		}
+	}
+
+	// 锁定方块时左键 = 掉下来 ↔ 升起来。
+	const bool bFireDown = PC->IsInputKeyDown(AimFireKey);
+	if (bFireDown && !bAimFireKeyWasDown && AimedBlock)
+	{
+		const bool bNowRises = AimedBlock->ToggleGravityZ();
+		if (bRedirectDebugLog)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[GSAim] %s gravity -> %s"),
+				*AimedBlock->GetName(), bNowRises ? TEXT("RISES(+Z)") : TEXT("FALLS(-Z)"));
+		}
+	}
+	bAimFireKeyWasDown = bFireDown;
+}
+
+void AGSRollingBallPawn::AdjustCameraDistance(float DirectionSign)
+{
+	if (!CameraArm)
+	{
+		return;
+	}
+	// 与 Q/E 同一套步长;弹簧臂长变化经相机平滑链生效,不跳变。
+	CameraArm->TargetArmLength = FMath::Clamp(
+		CameraArm->TargetArmLength + DirectionSign * CameraDistanceStepCm, 220.0f, 900.0f);
+	// 非瞄准态下 Q/E 的改动就是新的"恢复基线"。
+	if (!bAiming)
+	{
+		NonAimArmLengthCm = CameraArm->TargetArmLength;
+	}
 }
 
 EGSGravityRequestResult AGSRollingBallPawn::RequestManualGravityFlip()
@@ -1022,28 +1129,6 @@ EGSGravityRequestResult AGSRollingBallPawn::RequestGravityDirection(EGSGravityDi
 EGSGravityDirection AGSRollingBallPawn::GetCurrentGravityDirection() const
 {
 	return GravityManager ? GravityManager->GetCurrentDirection() : EGSGravityDirection::NEGATIVE_Z;
-}
-
-void AGSRollingBallPawn::HandleSetGravityAxis(EGSGravityAxis Axis)
-{
-	if (!GravityManager)
-	{
-		return;
-	}
-
-	// 转向器滑行期间忽略 1/2/3,理由同 G。
-	if (bGravityRedirectActive)
-	{
-		return;
-	}
-
-	// 1/2/3 snap gravity to the positive direction of the pressed axis. Pressing
-	// the already-active axis yields NO_CHANGE, which is harmless.
-	const EGSGravityRequestResult Result = GravityManager->SetGravityAxis(Axis, this, false);
-	if (Result == EGSGravityRequestResult::REJECTED_DISABLED)
-	{
-		ShowAxisDisabledHint(Axis);
-	}
 }
 
 void AGSRollingBallPawn::ShowAxisDisabledHint(EGSGravityAxis Axis)

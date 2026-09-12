@@ -46,17 +46,17 @@
 | `GS Pickup Item` | 可拾取物品,F 捡起,屏幕中央弹提示并锁输入,空格继续 | `PickupMessage` 留空=静默拾取不锁屏 |
 | `GS Key` | 钥匙(是拾取物的子类,行为同上) | `KeyID` 填个名字(如 `red`),捡到瞬间全图匹配的门一起开 |
 | `GS Key Door` | 锁住的门,挡路;被匹配钥匙打开后门板滑开 | `RequiredKeyID` 填对应钥匙的 KeyID;`SlideOffset` 定滑动方向/距离,`SlideDuration` 定时长 |
-| `GS Gravity Switch` | 重力开关 | 默认球滚过即触发(`bTriggerOnOverlap`);也可 F 按 |
+| `GS Gravity Switch` | **已退场(2026-09-12 新机制)**:玩家重力只由转向器圆弧改变,新关卡不要摆 | 类保留兼容旧关 |
 | `GS Surface Modifier Volume` | 表面区(慢速/加速) | `ProfileA` 选 DA_GS_Surface_Slow/Fast,`VolumeExtent` 贴住表面 |
 | `GS Landing Response Volume` | 特殊落地区(增强/抑制反弹) | 摆在落点,覆盖球身上的落地三带设置 |
-| `GS Block Base` + BlockProfile | 可动方块(随重力/破坏者) | 细节面板配 DA(`DA_GS_Block_Gravity` 等),再点 `ApplyBlockProfile` |
+| `GS Block Base` + BlockProfile | 可动方块(随重力/破坏者);**勾模拟物理 = 准星瞄准目标** | 细节面板配 DA(`DA_GS_Block_Gravity` 等),再点 `ApplyBlockProfile`;玩家 RMB 瞄准+LMB 切换它 升起/掉下(±Z) |
 | `GS Kill Volume` | 出界重置 | 房间上下边界外各一个(重力会翻转) |
 | `GS Checkpoint` / `GS Collectible` / `GS Finish Goal` | 检查点 / 收集物 / 终点 | 摆上即用 |
-| `GS Camera Rail` | 导轨相机轨道(防晕;不摆=旧跟随相机) | 本地 Z=轨道方向,`RailLength`=全长;详见 USAGE_WHITEBOX「相机导轨」 |
+| `GS Camera Rail` | **已弃用(2026-09-12 新机制)**:新关卡不摆,默认走无导轨相机(丝滑+球下1/3+右键聚焦;旧关兼容保留) | 旧机制文档见 USAGE_WHITEBOX「相机导轨」 |
 | **转向器** = 滑梯网块 + `GS Redirector` 组件 | 滑梯式重力转向:球碰到正面圆弧自动滑上连接的墙面/天花板,重力随之转向(双向;撞侧面不触发) | 滑梯网格+组件配 `GravityDirectionA/B` 两个面;**拼装手册见 `AgentSkill/gs-redirector-assembly/SKILL.md`**(测试关四个转向器实测) |
 | `GS Gravity Detector` + `GS Gravity Zone Manager` | 重力区域:方块平时不受重力,球穿过门口检测器才让**球要去的那一侧**方块受重力(双向,同时只有一个区域激活)。被禁用的方块**瞬间定住**(清速度),不滑行 | 检测器摆门口,前向指向 `ZoneB_Blocks` 那一侧;方块要勾 `Simulating Physics`;**拼装手册见 `AgentSkill/gs-gravity-zone-assembly/SKILL.md`**(编译通过,PIE 7/7 已过 ✅) |
 
-自动挂在球身上、不用摆的组件(细节面板可调):`GS Gravity Body`(重力受力)、`GS Landing Response`(**落地三带**:按网格自动判 ≤4格安静 / 5–6格反弹到4格 / ≥7格反重力,参数分组 `GravityShift|Landing|Grid`)、`GS Rail Camera`(导轨相机手感)。砸碎链:破坏者方块(`DA_GS_Block_GravityBreaker`)真砸到可破坏块(`bBreakable` + `DA_GS_Break_Fragile`)就会按能量击碎,无需额外配置。
+自动挂在球身上、不用摆的组件(细节面板可调):`GS Gravity Body`(重力受力)、`GS Landing Response`(**落地三带**:按网格自动判 ≤10格安静 / 10–20格反弹 / ≥20格反重力,参数分组 `GravityShift|Landing|Grid`)、`GS Rail Camera`(轨相机手感,仅旧导轨关生效)。砸碎链:破坏者方块(`DA_GS_Block_GravityBreaker`)真砸到可破坏块(`bBreakable` + `DA_GS_Break_Fragile`)就会按能量击碎,无需额外配置。
 
 ## 白盒装配(把系统放进你的关卡)
 
@@ -73,9 +73,9 @@
 
 | 参数 | 值 | 在哪改 |
 |---|---|---|
-| 落地三带(安静/反弹/反重力的格数) | 4 / 7 / 4 格 | 球组件 `GS Landing Response` → `GravityShift\|Landing\|Grid`(关掉 `bGridBasedLanding` 回旧 cm/s 模式) |
+| 落地三带(安静/反弹/反重力的格数) | 10 / 20 / 10 格 | 球组件 `GS Landing Response` → `GravityShift\|Landing\|Grid`(关掉 `bGridBasedLanding` 回旧 cm/s 模式) |
 | 网格细胞尺寸 | 100 cm | 同上 `GridCellSizeCm` |
-| 导轨相机跟球距离 | 700(300–1400) | 球组件 `GS Rail Camera` → `TrailDistanceCm`(游戏内 Q/E 也能调) |
+| 无导轨相机距离/手感 | 臂长 700、抬升 150 | Pawn 细节面板 `CameraArmLengthCm` / `CameraPivotLiftHeightCm`(Q/E 无导轨下暂不生效) |
 | 松键制动 | 60 | Pawn `StopTorqueAcceleration`(细节面板) |
 | 主动重力加速度 | 1600 cm/s² | `DA_GS_Gravity_Default` |
 
@@ -87,6 +87,7 @@
 - `AgentSkill/gs-block-assembly/SKILL.md` — **关卡侧 AI 专用积木拼装 skill**(拿白盒地图→拼成可玩关卡,配方实测)
 - `AgentSkill/gs-redirector-assembly/SKILL.md` — **转向器(滑梯式重力转向)拼装 skill**(摆滑梯/配两面/触发语义/PIE 自验配方,全实测)
 - `AgentSkill/gs-gravity-zone-assembly/SKILL.md` — **重力区域检测器拼装 skill**(摆检测器+管理器/朝向约定/参数表/PIE 用例,**编译通过 + PIE 7/7 全过**)
+- `AgentSkill/gs-aim-gravity-assembly/SKILL.md` — **准星改重力 + 无导轨相机拼装 skill**(2026-09-12 新机制:RMB 瞄准+LMB 切换方块 ±Z 重力/玩家重力只归转向器/聚焦参数表/PIE 自验配方;G/1/2/3/导轨相机/重力开关已退场)
 - `AGENT_GUIDE.md` — AI 接手指南(环境/连接/编译/排雷入口)
 - `HANDOVER_zflip.md` — 完整交接史(每轮工作、踩坑与修复)
 - `AgentSkill/ue-nocode/` — UE 无代码操控工作手册(AI skill,含按症状查询的主题手册)
