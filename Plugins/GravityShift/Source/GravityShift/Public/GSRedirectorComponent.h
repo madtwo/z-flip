@@ -96,6 +96,31 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "0.0"))
 	float CooldownSeconds = 0.3f;
 
+	// **"真的骑在面上"加固(2026-09-13 用户反馈 LDI_Gravityshift2 没上圆弧也触发)**:
+	// ①支撑门:触发瞬间球必须在支撑态、且悬空时长 ≤ MaxAirborneSecondsForTrigger。
+	//   滑地/滑墙进入的球是"骑在面上"的;从墙沿掉下来、空中飞过时擦到滑梯的球不算。
+	// ②分离门:球相对接触面的速度不能朝"离开滑梯"方向超过 SeparationRejectSpeedCm
+	//   (刚被滑梯边缘弹开的球,速度沿接触法线朝外)。两个门都留开关便于 A/B 对照。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector")
+	bool bRequireSupportToTrigger = true;
+
+	// 单面进入开关(2026-09-13):可禁止从某一面进入(默认两面都开=原双向行为)。
+	// 例:只让球从地面滚入、从墙上滑下时不触发 → 关掉 A 那面。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector")
+	bool bAllowEntryFromA = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector")
+	bool bAllowEntryFromB = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "0.0"))
+	float MaxAirborneSecondsForTrigger = 0.2f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector")
+	bool bRejectSeparatingContact = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "0.0"))
+	float SeparationRejectSpeedCm = 150.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Debug")
 	bool bDebugLog = false;
 

@@ -552,19 +552,25 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 	// 碰撞探针把臂压短时,抬升等比缩短 → 球的角取景恒定(贴墙不出房、球不出框)。
 	// —— 相机臂长:自建探针 + 去弹平滑(替掉弹簧臂自带探针的逐帧翻转)——
 	// 自带探针在台阶/平台边缘会 700↔175 逐帧翻转,相机被前后拽动 ±500cm(爬楼梯画面
-	// 抖动主因)。改为:沿"枢轴→期望相机位"打 ECC_Camera 探针;命中立即收短(防穿墙),
-	// 只有连续 0.25s 无命中才缓慢放长——翻转被去弹,相机稳定不再弹跳。
+	// 抖动主因)。改为:沿"枢轴→期望相机位"打 ECC_Camera 探针;命中立即压入(防穿墙),
+	// 只有连续无命中 ArmExtendHoldSeconds 后才缓慢放长——翻转被去弹,相机稳定不再弹跳。
+	// 2026-09-13(用户反馈"容易穿模")两处加固:①探针必须沿相机真实最终朝向打(含
+	// AimPitchDeg 瞄准俯仰微调;旧实现用 CurrentCameraRotation,视线偏最多 ~17°,
+	// 探针判"安全"时相机实际已进墙);②球扫掠替代单线 + 命中立即压入替代 8/s 平滑
+	// 收短(平滑期间相机停在墙里的那几帧就是穿模)。
 	const FVector PivotLoc = CameraPivot->GetComponentLocation();
-	const FVector ArmDir = -CurrentCameraRotation.GetForwardVector();
+	const FQuat ProbeRotation = BuildCameraRotation(TargetCameraUp, LastAimPitchDeg);
+	const FVector ArmDir = -ProbeRotation.GetForwardVector();
 	const FVector DesiredCamPos = PivotLoc + ArmDir * CameraArmLengthCm;
 	float SafeArmCm = CameraArmLengthCm;
 	FString ArmHitName = TEXT("none");
 	{
 		FHitResult ArmHit;
 		FCollisionQueryParams ArmParams(SCENE_QUERY_STAT(GSFallbackCamProbe), false, this);
-		if (GetWorld()->LineTraceSingleByChannel(ArmHit, PivotLoc, DesiredCamPos, ECC_Camera, ArmParams))
+		if (GetWorld()->SweepSingleByChannel(ArmHit, PivotLoc, DesiredCamPos, FQuat::Identity,
+			ECC_Camera, FCollisionShape::MakeSphere(CameraProbeRadiusCm), ArmParams))
 		{
-			SafeArmCm = FMath::Max((ArmHit.Location - PivotLoc).Size() - 20.0f, 40.0f);
+			SafeArmCm = FMath::Max((ArmHit.Location - PivotLoc).Size() - CameraProbeMarginCm, 40.0f);
 			if (ArmHit.GetActor())
 			{
 				ArmHitName = ArmHit.GetActor()->GetName();
@@ -575,25 +581,49 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 	{
 		SmoothedArmLengthCm = SafeArmCm;
 	}
-	if (SafeArmCm < CameraArmLengthCm - 1.0f)
+	// 目标臂长恒为"探针允许的最大臂长" SafeArmCm(全空=满臂)。注意不能只写
+	// Min(当前,SafeArm):SafeArm 未满但比当前臂更远时(离开墙缝)臂会永远涨不回去
+	// ——首次实现就踩了这个死锁(臂卡 40,相机贴脸+球被隐藏)。
+	if (SafeArmCm < SmoothedArmLengthCm)
 	{
+		// 障碍比当前臂更近:立即压入(不做时间平滑——平滑期间相机停在墙里就是"穿模")。
 		ProbeClearSeconds = 0.0f;
-		SmoothedArmLengthCm = FMath::FInterpTo(SmoothedArmLengthCm, SafeArmCm, DeltaSeconds, 8.0f);
+		SmoothedArmLengthCm = SafeArmCm;
 	}
 	else
 	{
+		// 已处于安全范围:按"驻留 + 限速"平滑放长到 SafeArm(未满臂时同样适用)。
+		// 棱边探针逐帧翻转(命中帧不断把驻留清零)在此被去弹,不会来回抽。
 		ProbeClearSeconds += DeltaSeconds;
 		// 瞄准解除后的 1.2s 内走"快速回弹":不等 0.7s 驻留、放长速度 ×3,
 		// 松开右键后视线一离开天花板/墙就立刻回到正常距离。
 		const bool bFastExtend = GetWorld() && GetWorld()->GetTimeSeconds() < FastArmExtendUntilSeconds;
 		if (ProbeClearSeconds > (bFastExtend ? 0.0f : ArmExtendHoldSeconds))
 		{
-			SmoothedArmLengthCm = FMath::FInterpTo(SmoothedArmLengthCm, CameraArmLengthCm, DeltaSeconds,
+			SmoothedArmLengthCm = FMath::FInterpTo(SmoothedArmLengthCm, SafeArmCm, DeltaSeconds,
 				bFastExtend ? FMath::Max(ArmLengthInterpSpeed * 3.0f, 12.0f)
 					: FMath::Max(ArmLengthInterpSpeed, 0.1f));
 		}
 	}
 	CameraArm->TargetArmLength = SmoothedArmLengthCm;
+
+	// 球贴脸遮挡:臂塌缩到极短时球占满画面中心,隐藏球网格让出视野(拉远自动恢复)。
+	// 瞄准态不隐藏(越肩偏移已让开视线,且球是瞄准姿态的一部分)。滞回防阈值附近闪烁;
+	// 纯视觉调整,不影响物理/瞄准判定。
+	if (BallMesh)
+	{
+		if (!bAiming && !bBallMeshHidden && SmoothedArmLengthCm < BallMeshHideBelowArmCm)
+		{
+			bBallMeshHidden = true;
+			BallMesh->SetVisibility(false);
+		}
+		else if (bBallMeshHidden && (bAiming || SmoothedArmLengthCm > BallMeshShowAboveArmCm))
+		{
+			bBallMeshHidden = false;
+			BallMesh->SetVisibility(true);
+		}
+	}
+
 	const float LiftScale = FMath::Clamp(SmoothedArmLengthCm / FMath::Max(CameraArmLengthCm, 1.0f), 0.0f, 1.0f);
 	const FVector TargetPivot = BallLoc + CameraLiftDirection * CameraPivotLiftHeightCm * LiftScale;
 	// 位置指数平滑:G 的平移过渡/翻滚带抖动都被滤掉(导轨相机同款手法)。
@@ -653,6 +683,8 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 	}
 	CameraPivot->SetWorldLocationAndRotation(
 		Location, BuildCameraRotation(TargetCameraUp, AimPitchDeg));
+	// 供下一帧探针沿"相机真实朝向"打(1 帧滞后,避免与 LiftScale→AimPitchDeg 循环依赖)。
+	LastAimPitchDeg = AimPitchDeg;
 	CurrentCameraUp = CurrentCameraRotation.RotateVector(FVector::UpVector);
 }
 
@@ -667,6 +699,34 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 	{
 		// 转向器滑行期间由重力旋转接管:不施加 WASD 驱动、不刹车,玩家输入不干扰滑行。
 		return;
+	}
+
+	// 楼梯吸力(2026-09-13 用户需求):踩在楼梯上时给一个朝支撑面的加速度,爬楼时把球
+	// "摁"在台阶上、不被台阶棱角弹飞。**只对楼梯生效**——沿重力向下打探针,命中 actor
+	// 的名字/类名含 StairStickNameTag(默认 "Stairs")才施力;空中(刚被台阶弹起)时探针
+	// 仍能探到下方台阶,正是"飞出去"的瞬间被拉回来。其它任何表面一律不受影响。
+	// 有输入/无输入都生效(松手停在台阶上时同样贴着)。转向器滑行期在上面已 return。
+	if (bStairStickEnabled && BallCollision->IsSimulatingPhysics())
+	{
+		const FVector StickDown = GetActiveGravityDirection().GetSafeNormal();
+		if (!StickDown.IsNearlyZero())
+		{
+			const FVector StickFrom = BallCollision->GetComponentLocation();
+			const float StickReach = BallCollision->GetScaledSphereRadius() + StairStickProbeReachCm;
+			FHitResult StickHit;
+			FCollisionQueryParams StickParams(SCENE_QUERY_STAT(GSStairStick), false, this);
+			if (GetWorld()->LineTraceSingleByChannel(StickHit, StickFrom, StickFrom + StickDown * StickReach,
+				ECC_Visibility, StickParams))
+			{
+				const AActor* StickActor = StickHit.GetActor();
+				if (StickActor && !StairStickNameTag.IsEmpty()
+					&& (StickActor->GetActorNameOrLabel().Contains(StairStickNameTag)
+						|| StickActor->GetClass()->GetName().Contains(StairStickNameTag)))
+				{
+					BallCollision->AddForce(StickDown * StairStickAccelCm, NAME_None, true);
+				}
+			}
+		}
 	}
 
 	if (MoveInput.IsNearlyZero())
@@ -704,12 +764,69 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 	FVector Forward = CameraPivot ? CameraPivot->GetForwardVector() : GetActorForwardVector();
 	FVector Right = CameraPivot ? CameraPivot->GetRightVector() : FVector::CrossProduct(Up, Forward);
 
-	if (CameraPivot && FMath::Abs(Up.Z) < 0.5f)
+	if (CameraPivot && bAdaptiveDriveBasis)
 	{
-		// Wall: the camera's right is perpendicular to the wall, so the generic
-		// projection collapses. Control spec: W/S roll horizontally along the
-		// wall; A/D climb/descend — A climbs on the screen-left wall, D climbs on
-		// the screen-right wall (gravity toward the camera's right = right wall).
+		// 相机角度自适应控制基(2026-09-13 用户定则):视线与支撑面越"正面相对"
+		// (FaceOn=|视线·支撑上|→1),控制越向"屏幕相对"过渡——W 从"视线在面内的投影"
+		// 渐变到"屏幕上方向在面内的投影"(正对墙面时 W=向上爬),A/D 过渡到"屏幕右的
+		// 面内投影"。视线与面平行(FaceOn→0,平视)时完全沿用旧行为。
+		const FVector CamRight = CameraPivot->GetRightVector();
+		const FVector CamUp = CameraPivot->GetUpVector();
+		const float FaceOn = FMath::Abs(FVector::DotProduct(Forward, Up));
+		const float ScreenBlend = FMath::Clamp(
+			(FaceOn - DriveBasisFaceOnMin) / FMath::Max(DriveBasisFaceOnMax - DriveBasisFaceOnMin, 0.01f),
+			0.0f, 1.0f);
+
+		if (FMath::Abs(Up.Z) < 0.5f)
+		{
+			// 墙面:平行端 = 视线水平分量当 W、竖直攀爬当 A/D(旧"左/右墙"符号约定);
+			// 正对端 = 屏幕上方向当 W、屏幕右当 A/D。沿 FaceOn 混合,转相机时映射渐变
+			// 而非突跳(用户要求"相机角度不同要有对应的不同操作形式")。
+			// ⚠ 相机正对墙面(墙上跟随的常态!)时视线水平分量≈0(Along 退化),必须由
+			// 屏幕相对端兜底——不能落回通用投影(那里同样是零向量,会退到球的前向)。
+			FVector Along = FVector(Forward.X, Forward.Y, 0.0f);
+			const bool bHaveAlong = Along.Normalize();
+			const FVector Climb(0.0f, 0.0f,
+				FVector::DotProduct(GravityDir, CamRight) >= 0.0f ? 1.0f : -1.0f);
+			const FVector ScreenUp = (CamUp - Up * FVector::DotProduct(CamUp, Up)).GetSafeNormal();
+			const FVector ScreenRight = (CamRight - Up * FVector::DotProduct(CamRight, Up)).GetSafeNormal();
+			const bool bHaveScreen = !ScreenUp.IsNearlyZero() && !ScreenRight.IsNearlyZero();
+
+			if (bHaveAlong && bHaveScreen)
+			{
+				Forward = (Along * (1.0f - ScreenBlend) + ScreenUp * ScreenBlend).GetSafeNormal();
+				Right = (Climb * (1.0f - ScreenBlend) + ScreenRight * ScreenBlend).GetSafeNormal();
+			}
+			else if (bHaveScreen)
+			{
+				Forward = ScreenUp;
+				Right = ScreenRight;
+			}
+			else if (bHaveAlong)
+			{
+				Forward = Along;
+				Right = Climb;
+			}
+			// 都退化(极端视角):走下面的通用投影兜底。
+		}
+		else if (ScreenBlend > 0.0f)
+		{
+			// 地面/天花板:正对端改用"屏幕上方向在面内的投影"当 W(直视地面时视线投影
+			// 近零,旧代码会退到球的前向、方向不可预期)。Right 恒为屏幕右的面内投影。
+			const FVector UpOnPlane = (CamUp - Up * FVector::DotProduct(CamUp, Up)).GetSafeNormal();
+			const FVector FwdParallel = (Forward - Up * FVector::DotProduct(Forward, Up)).GetSafeNormal();
+			if (!UpOnPlane.IsNearlyZero())
+			{
+				Forward = FwdParallel.IsNearlyZero()
+					? UpOnPlane
+					: (FwdParallel * (1.0f - ScreenBlend) + UpOnPlane * ScreenBlend).GetSafeNormal();
+			}
+		}
+	}
+	else if (CameraPivot && FMath::Abs(Up.Z) < 0.5f)
+	{
+		// A/B 对照路径(bAdaptiveDriveBasis=false):旧墙上约定——W=沿墙横滚、A/D=攀爬
+		// (A climbs on the screen-left wall, D climbs on the screen-right wall)。
 		FVector Horizontal = FVector(Forward.X, Forward.Y, 0.0f);
 		if (Horizontal.Normalize())
 		{
@@ -717,8 +834,6 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 			const float SideSign = FVector::DotProduct(GravityDir, CameraPivot->GetRightVector()) >= 0.0f ? 1.0f : -1.0f;
 			Right = FVector(0.0, 0.0, SideSign);
 		}
-		// Degenerate (camera faces straight into the wall plane): keep the
-		// generic projected basis computed above.
 	}
 
 	Forward = Forward - Up * FVector::DotProduct(Forward, Up);

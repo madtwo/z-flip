@@ -229,6 +229,37 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
 	float AirControlAccelerationCm = 900.0f;
 
+	// 楼梯吸力(2026-09-13 用户需求):踩在楼梯上时给一个朝支撑面的小加速度,爬楼时把球
+	// "摁"在台阶上、不从台阶棱角弹飞。**只对楼梯生效**——向下探针命中的 actor 名字/类名
+	// 含 StairStickNameTag 才施力(默认 "Stairs" 匹配 Blockout_Stairs_Linear 等);
+	// 其他任何表面(地板/墙/方块)完全不受影响。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement")
+	bool bStairStickEnabled = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
+	float StairStickAccelCm = 1500.0f;
+
+	// 吸力探针长度(cm,球面之外):球被弹起后仍在其下方该距离内探到楼梯就继续吸。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
+	float StairStickProbeReachCm = 150.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement")
+	FString StairStickNameTag = TEXT("Stairs");
+
+	// 控制基向量随相机角度自适应(2026-09-13 用户定则):视线与支撑面越"正面相对"
+	// (FaceOn=|视线·支撑上|→1),移动基越向"屏幕相对"过渡——W 从"视线在面内的投影"
+	// 渐变到"屏幕上方向在面内的投影"(正对墙面时 W=向上爬、A/D=沿墙),视线与面平行
+	// 时完全沿用旧行为。中间角度在 [Min,Max] 区间线性混合,避免换映射的突跳。
+	// 设 false 恢复旧行为(墙上 W=沿墙横滚、A/D=攀爬)供 A/B 对照。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement")
+	bool bAdaptiveDriveBasis = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float DriveBasisFaceOnMin = 0.55f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float DriveBasisFaceOnMax = 0.85f;
+
 	// 无导轨相机滚转锁世界竖直(与导轨相机同一原则):G 翻转只平移跟球、画面不颠倒
 	//(颠倒视角会晕 3D,用户定案)。设 true 恢复旧的随重力翻转行为。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera")
@@ -288,6 +319,22 @@ public:
 	// 拉远显得拖沓。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0"))
 	float ArmExtendHoldSeconds = 0.7f;
+
+	// 自建探针的球半径(cm):用球扫掠替代单线,斜擦棱边/贴面时提前收短,防近裁剪面穿透。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "1.0"))
+	float CameraProbeRadiusCm = 18.0f;
+
+	// 探针命中后额外收短的余量(cm):相机与墙面之间保留的安全空隙。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0"))
+	float CameraProbeMarginCm = 12.0f;
+
+	// 球贴脸遮挡:臂塌缩到 Hide 以下(球占满画面)时隐藏球网格,回到 Show 以上恢复。
+	// 纯视觉,不影响物理;瞄准中(有越肩偏移让开视线)不隐藏。滞回防阈值附近闪烁。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0"))
+	float BallMeshHideBelowArmCm = 230.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0"))
+	float BallMeshShowAboveArmCm = 300.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Interaction", meta = (ClampMin = "0.0"))
 	float InteractionRadiusCm = 320.0f;
@@ -370,8 +417,16 @@ public:
 	// 平滑后的实测臂长(探针塌缩会逐帧翻转,直接喂 LiftScale 会让枢轴高度抽动)。
 	float SmoothedArmLengthCm = -1.0f;
 
-	// 探针"连续无命中"计时:命中立即收短、连续无命中 0.25s 才放长(去弹翻转)。
+	// 探针"连续无命中"计时:命中立即压入、连续无命中 ArmExtendHoldSeconds 后才放长(去弹翻转)。
 	float ProbeClearSeconds = 0.0f;
+
+	// 探针朝向用的"上一帧瞄准俯仰":探针必须沿相机真实最终朝向(含 AimPitchDeg 微调)
+	// 打,否则视线偏最多 ~17°,探针判"安全"而相机已进墙("容易穿模"根因之一)。
+	// 取上一帧值避免与 LiftScale→AimPitchDeg 形成循环依赖。
+	float LastAimPitchDeg = 0.0f;
+
+	// 球网格隐藏滞回状态(瞬时,非反射)。
+	bool bBallMeshHidden = false;
 
 	// ---- 转向器过渡状态(瞬时,非反射) ----
 	bool bGravityRedirectActive = false;

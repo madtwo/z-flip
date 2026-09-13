@@ -82,7 +82,15 @@ description: z-flip / GravityShift 转向器(滑梯式重力转向)拼装手册�
 5. **同一网格资产改碰撞设置会影响所有实例**（好事：一次改全生效；坏事：别忘了别处也在用）。
 6. 验证脚本注意：PIE 期间要用 `UnrealEditorSubsystem.get_game_world()`（不是 get_editor_world）；给球注入速度会被"松键刹车"在恢复帧吃掉——测运动用关卡里现成的持续驱动方式（见 HANDOVER §23 的测试方法坑）。
 
-## 6. 相关文档
+## 6. 2026-09-13 新增:两道"真实性"门 + 单面进入开关
+
+- **背景**:球**悬空**从墙沿掉落、擦到滑梯边缘也会触发(用户反馈"没上圆弧也触发、卡得莫名")。
+- **支撑门** `bRequireSupportToTrigger`(默认开):触发瞬间球必须在支撑态、悬空 ≤ `MaxAirborneSecondsForTrigger`(0.2s)。滑地/滑墙进入照常,空中飞过不算。
+- **分离门** `bRejectSeparatingContact`(默认开):速度沿接触法线朝"离开滑梯"方向 > `SeparationRejectSpeedCm`(150) 拒绝。
+- **单面进入开关** `bAllowEntryFromA/bAllowEntryFromB`(默认都开=双向):只想让球从地面滚入 → 关掉墙那面。
+- 验证:地面滚入应照常触发;空中擦过日志应有 `gate[airborne]`;被拒时 `gate[...]` 会打印实测值(先开组件 `bDebugLog`)。
+
+## 7. 相关文档
 
 - `README.md`「功能积木清单」——所有 GS 积木一览
 - `USAGE_WHITEBOX.md` —— 摆放/文件规范

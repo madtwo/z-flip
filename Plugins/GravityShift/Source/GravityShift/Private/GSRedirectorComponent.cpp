@@ -6,6 +6,7 @@
 #include "Components/SphereComponent.h"
 #include "Engine/World.h"
 #include "Kismet/GameplayStatics.h"
+#include "GSLandingResponseComponent.h"
 #include "GSRollingBallPawn.h"
 
 UGSRedirectorComponent::UGSRedirectorComponent()
@@ -203,6 +204,13 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		return;
 	}
 
+	// 单面进入开关(2026-09-13):默认两面都开(双向);关了的那一面进入时直接拒绝。
+	if (bEnterFromA ? !bAllowEntryFromA : !bAllowEntryFromB)
+	{
+		GateLog(TEXT("entryside"), ExitDir, 0.0f, false);
+		return;
+	}
+
 	const FVector EntryUp = -EntryGravity;
 	const FVector ExitUp = -ExitDir;
 	const FVector BendAxis = FVector::CrossProduct(EntryUp, ExitUp).GetSafeNormal();
@@ -244,6 +252,30 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	{
 		GateLog(TEXT("lip"), ExitDir, DistToLipCm, true);
 		return;
+	}
+
+	// **"真的骑在面上"加固(2026-09-13 用户反馈)**:擦过/弹开/空中掠过不应触发。
+	// ①支撑门:球必须在支撑态且悬空时长 ≤ MaxAirborneSecondsForTrigger——滑地/滑墙
+	//   进入的球"骑在面上";从墙沿掉下来、空中飞过时擦到滑梯的球则是悬空的。
+	// ②分离门:球相对接触面的速度不能朝"离开滑梯"方向过大(刚被边缘弹开的球,速度
+	//   沿接触法线朝外)。用户误触发那次球是悬空脱离墙面的:vIn 含 +341cm/s 离面分量。
+	if (bRequireSupportToTrigger && Ball->LandingResponse)
+	{
+		const float AirborneSec = Ball->LandingResponse->GetAirborneSeconds();
+		if (!Ball->LandingResponse->IsSupported() || AirborneSec > MaxAirborneSecondsForTrigger)
+		{
+			GateLog(TEXT("airborne"), ExitDir, AirborneSec, bTouch);
+			return;
+		}
+	}
+	if (bRejectSeparatingContact)
+	{
+		const float SepSpeedCm = FVector::DotProduct(Velocity, ContactNormal);
+		if (SepSpeedCm > SeparationRejectSpeedCm)
+		{
+			GateLog(TEXT("separating"), ExitDir, SepSpeedCm, bTouch);
+			return;
+		}
 	}
 
 	// 静止球不触发。

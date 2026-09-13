@@ -8,7 +8,7 @@
 - **`unreal.Vector2D(a, b)` 参数序是 (X, Y)**:`set_move_input(Vector2D(0,-1))` 是"S 后退"不是"A 左移"(X=左右/A-D,Y=前后/W-S)。传反了测试结果"看起来像代码错了",2026-09-03 测墙面控制时白白浪费一轮排查——先打印/推敲再下结论
 - `StaticMeshComponent` **没有** `collision_enabled`/`collision_profile_name`/`use_ccd` 属性 → 用方法 `get_collision_enabled()`/`get_collision_object_type()`/`set_use_ccd(bool)`;或读 `get_editor_property("body_instance")`(BodyInstance 里才有 collision_enabled/object_type/collision_responses)
 - `StaticMesh` **没有** `collision_trace_flag`,它在 `mesh.get_editor_property("body_setup")` 上(建模网格碰撞根因见 PROJECT_SETUP.md)
-- `HitResult` 在本版本**不是 subscriptable**,用 `.to_dict()`
+- `HitResult` 在本版本**不是 subscriptable**,用 `.to_dict()`;且**没有 `.actor`/`.hit_actor` 属性**(直接访问 AttributeError)——dict 里读 `['hit_actor']`(Object)/`['location']`/`['normal']`(Vector 结构体,`.z` 可读)/`['distance']`(2026-09-13 实踩)
 - `EditorStaticMeshLibrary` 没有 `get_number_simple_collisions`;整个 EditorScriptingUtilities 已废弃(DeprecationWarning),优先用 Subsystem
 
 ## 类与蓝图
@@ -22,6 +22,10 @@
 
 - Python 侧枚举**不带 E 前缀**:`unreal.GSGravityChangeReason.SCRIPTED` ✓;`unreal.EGSGravityChangeReason` 不存在,原始 int 也不接受
 - UFUNCTION 签名靠 **TypeError 提示逐个补参**:实测 `request_toggle_gravity(requester, reason, force)` 报了三次错才凑齐;参数名snake_case(`block_profile`/`volume_extent`/`gravity_revision`)
+- **签名速查优先 `__doc__` 自省**:`python ue.py py "print(unreal.X.method.__doc__)"` 一次拿到参数名+类型(实测 `set_level_viewport_camera_info(camera_location, camera_rotation, viewport_config_key)`);MCP 的 `discover_python_function`/`discover_python_class` 是**顶层工具、不属于任何 toolset**,`ue.py call <toolset> ...` 调不到("Toolset not found"),别绕路
+- `LevelEditorSubsystem.set_level_viewport_camera_info(loc, rot, viewport_config_key)`:5.8 **第三参必填**,传 `''` 即可;不传报 TypeError required argument not found(2026-09-13 实踩)
+- `TraceTypeQuery.TRACE_TYPE_QUERY1` 已废弃(DeprecationWarning)→ 用 `unreal.TraceTypeQuery.ECC_VISIBILITY`;`line_trace_single(w, start, end, channel, complex, [], DrawDebugTrace.NONE, True)` 的 `actors_to_ignore` 传 `[]`
+- `actor.get_folder_path()` 返回 **`unreal.Name`**(没有 `.path`)→ `str()` 直接用;配 `get_actor_label()` 读标签——**大纲文件夹+标签是关卡侧唯一可靠的分组信息**(P1/P2 这种),umap 二进制里拿不到
 - 属性名猜不中就 `dir(obj)` 找方法 + 逐个试 `get_editor_property`
 - `find_actors` 必填 `name`/`tag`/`collision_channels` 全套(空传 `tag:""`, `collision_channels:[]`);`set_actor_transform` 参数名是 **xform**
 - `EditorLevelLibrary` 大量方法带 DeprecationWarning,能用就用(不影响功能),优先 Subsystem 写法:`unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)` / `unreal.UnrealEditorSubsystem` / `unreal.EditorActorSubsystem`

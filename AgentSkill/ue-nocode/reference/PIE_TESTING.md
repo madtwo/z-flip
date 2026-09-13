@@ -67,6 +67,29 @@ pawn  = unreal.GameplayStatics.get_player_pawn(w, 0)
 - 读状态用 getter 方法优先(`get_gravity_direction()`),属性名靠 TypeError 提示逐个补参
 - 注意 PIE 世界是 `/Game/UEDPIE_0_<关卡名>`,编辑器世界与 PIE 世界是两份;编辑器关卡摆位不随 PIE 改变
 
+## 给用户搭测试现场:标准装配线(2026-09-13 第二关测试轮定型)
+
+> 场景:用户说"打开 XX 关卡/第 N 关,我要测试"——AI 把现场摆好,用户只负责玩。
+
+1. 起编辑器(没开时)→ 轮询 `netstat :8000 LISTENING`;没自启就组播发 `ModelContextProtocol.StartServer`(实测 5s 就绪,见 CONNECT_MCP.md)。
+2. `load_level(目标图)` + 断言;PIE 活跃时绝不切图(坑 6)。
+3. 视口相机摆到测试区域:`LevelEditorSubsystem.set_level_viewport_camera_info(loc, rot, '')`——5.8 第三参必填(见 PYTHON_API_PITFALLS)。
+4. `editor_request_begin_play()` → 轮询 `is_in_play_in_editor()`。
+5. **把玩家送进测试区域**(UE5.8 没有 Play-From-Here API):正常起 PIE 后传送——
+   ```python
+   w = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
+   ball = unreal.GameplayStatics.get_player_pawn(w, 0)
+   ball.set_actor_location(unreal.Vector(x, y, z), False, False)
+   for c in ball.get_components_by_class(unreal.PrimitiveComponent):
+       c.set_physics_linear_velocity(unreal.Vector(0, 0, 0))
+       c.set_physics_angular_velocity(unreal.Vector(0, 0, 0))
+   ```
+   隔几秒读回**位置+速度双确认**落稳(本轮 (800,-400,200) → 停 z=-50、速度 0 = 地面 z≈-100 + 球半径 50;只读位置会被"悬空/缓慢下滑"骗过)。
+6. 收尾三件:①WM_CLOSE 关"消息日志"(坑 3);②`SetForegroundWindow` 主编辑器窗口(标题含"虚幻编辑器");③提醒用户**先点一下视口**再操作。
+7. 截屏核对 dll:截屏前先把编辑器切前台(CUA 抓的是桌面最上层,不切会抓到用户正在看的别的窗口);PIE 画面 HUD 顶行 `GS build <日期> <时间>` = "跑的是哪版 dll"的铁证(本轮截到 08:02:20,与 dll mtime 吻合)。
+
+**找落点先探地板**:多层白盒从高空向下打线,命中的是顶层地面/屋顶;找"内部楼层"要把探针起点放到顶层之下再打,或拿已知落点旁证(本轮塔分层:地面 z≈-100、中 500-700、顶 1000,即竖井旁逐点扫出)。
+
 ## 历史案例速查
 
 - **v2 六向 G/R 修复**(2026-09-01):BindKey 对关卡实例失效 → 改 Tick 轮询,重编译 14s,OS 注入验收 G=横移 2156cm、R=RESET 归位 ✅

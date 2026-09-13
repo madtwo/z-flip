@@ -42,6 +42,8 @@ python pull_apply_remote.py madtwo/z-flip since_sha "D:/UE/z-flip"   # 备份+�
 - `pull_check_remote.py`:GET `/commits` + `/compare/<since>...main`,打印 status/+/-/文件名。**先看清单再动手**——若远端改了用户本地也在改的文件(如 umap),先 surface 别覆盖
 - `pull_apply_remote.py`:逐文件 GET `/git/blobs/<sha>` → base64 → 写盘;写前把本地旧版备份到 `<workdir>/_sync_backup/<head>/`;写后本地重算 blob sha1 校验;同时把 compare 返回的统一 diff 存成 `_patches.diff` 供读改动意图
 - **compare 接口本机实测响应里没有 `head_commit` 键**(只给 base/merge_base/commits)→ 取 head 用 `cmp["commits"][-1]["sha"]`,别盲取 KeyError
+- `/compare/<base>...main` 只给**累计**差异;要定位"哪个提交改了什么"用 `GET /commits/<sha>`(响应 `files[]` 带 status/additions/deletions,二进制资产也列名)——2026-09-13 靠它确认"第二关白盒重置"改的是 `Re_Blockout.umap` 而不是新建图
+- 拉完**把新文件提交进本地跟踪**(`git add` + commit):push 脚本按 `git ls-files` 建树——远端有而本地未跟踪的文件,下次推送会被删(2026-09-12 事故的机制面)
 - `files[].patch` 对小文件自带完整 unified diff,**读"队友改了什么"直接读 patch,不用二次下载**;新增文件 patch=全文
 - 落盘后必做两件核对:①grep 关键新符号确认内容真换了(别只看时间戳);②对比 `Binaries/*.dll` 与源码时间戳——**dll 落后源码=必须关编辑器重编才生效**(编辑器开着 dll 被锁,编不了)
 - 队友只推了源码时,新 .cpp/.h 无需改 Build.cs(UBT 自动收模块目录),但 dll 过期就跑不了新逻辑
@@ -51,12 +53,14 @@ python pull_apply_remote.py madtwo/z-flip since_sha "D:/UE/z-flip"   # 备份+�
 ## 流程坑(真踩)
 
 1. 读令牌的 ps1 辅助脚本**别在管线中途删**——删了之后全部拿到空 token,静默 401,浪费一整轮
-2. bash 里 `(A && VAR=x || VAR=y)` 括号子 shell 丢变量 → `$VAR script.py` 变成"把 py 当 shell 脚本跑"(`import: command not found`);用 `VAR=x command` 前缀或 && 直连
-3. push 脚本提交信息取自本地 HEAD(`git cat-file commit HEAD`)→ **先在本地 commit 好再推送**,远端提交信息才正确
-4. **⚠ 铁律(2026-09-08 用户发火立规):队友正在干活时不要推送**。用户原话:"你干嘛推送,不要推送,他在搞!"——尤其别动别人刚 push 的 umap/正在开发的地图。push 前先问用户"现在推合不合适";多人文档轮可以推,**动了别人名下的内容(umap/他的模块)必须先问**
-5. **⚠ 铁律(2026-09-12 实测):推前查到远端 head 变了 = 立刻停下,先拉取合并再推——打印完 head 继续推等于没查**。`push_via_api.py` 按**本地已跟踪文件清单**重建整棵树:凡远端有、本地没有的文件(队友新加的)会被**直接删除**。实测:打印 head 见到队友新提交(f215303)仍继续推 → 队友 7 个新文件从远端树消失。恢复配方:净差异 compare 里不含"加了又删"的文件,要从队友提交的 `git/trees/<sha>` 按 blob 直接取回落盘(sha 校验)→ 本地提交 → 重推;推后用 `compare/<队友提交>...main` 的 removed 数=0 验收
-6. **函数级 static 持有 UObject 必须 AddToRoot()**(2026-09-12):静态指针不进 GC 引用图,PIE 重启间隙被回收 → 下局设悬空指针,BodyInstance 断言直接崩编辑器,且悬空期接触解算被污染(物体缓慢爬行、无视重力切换)
-7. push 脚本对已跟踪文件逐个预检——纯文档改动也会跑 ~291 个 GET,网络差时耐心等日志
+2. **读令牌别漏 `export`**(2026-09-13 又踩):bash 里 `GH_TOKEN=$(...)` 不写 export,变量进不了 python 子进程 → 与上一条同款静默 401;`echo ${#GH_TOKEN}` 只能证明本 shell 有值,证明不了子进程收得到
+3. bash 里 `(A && VAR=x || VAR=y)` 括号子 shell 丢变量 → `$VAR script.py` 变成"把 py 当 shell 脚本跑"(`import: command not found`);用 `VAR=x command` 前缀或 && 直连
+4. push 脚本提交信息取自本地 HEAD(`git cat-file commit HEAD`)→ **先在本地 commit 好再推送**,远端提交信息才正确
+5. **⚠ 铁律(2026-09-08 用户发火立规):队友正在干活时不要推送**。用户原话:"你干嘛推送,不要推送,他在搞!"——尤其别动别人刚 push 的 umap/正在开发的地图。push 前先问用户"现在推合不合适";多人文档轮可以推,**动了别人名下的内容(umap/他的模块)必须先问**
+6. **⚠ 铁律(2026-09-12 实测):推前查到远端 head 变了 = 立刻停下,先拉取合并再推——打印完 head 继续推等于没查**。`push_via_api.py` 按**本地已跟踪文件清单**重建整棵树:凡远端有、本地没有的文件(队友新加的)会被**直接删除**。实测:打印 head 见到队友新提交(f215303)仍继续推 → 队友 7 个新文件从远端树消失。恢复配方:净差异 compare 里不含"加了又删"的文件,要从队友提交的 `git/trees/<sha>` 按 blob 直接取回落盘(sha 校验)→ 本地提交 → 重推;推后用 `compare/<队友提交>...main` 的 removed 数=0 验收。防复发:推前核对 head ≠ 预期就中止
+7. **远端回滚方法(实测可用)**:`PATCH /repos/<owner>/<repo>/git/refs/heads/main {"sha": <目标>, "force": true}` 可把 main 直接拨回旧提交(REST 无 revert,直接拨 ref)。回滚目标选"最后一次没动队友 umap 的提交";拨之前先查 `/branches/main` 和 `/commits?per_page=5` 确认**队友没在我之后推过新东西**(有就绝不动)。被摘掉的提交只是不可达,内容仍在,别慌
+8. **函数级 static 持有 UObject 必须 AddToRoot()**(2026-09-12):静态指针不进 GC 引用图,PIE 重启间隙被回收 → 下局设悬空指针,BodyInstance 断言直接崩编辑器,且悬空期接触解算被污染(物体缓慢爬行、无视重力切换)
+9. push 脚本对已跟踪文件逐个预检——纯文档改动也会跑 ~291 个 GET,网络差时耐心等日志
 
 ## 标准流程(下次照抄)
 
