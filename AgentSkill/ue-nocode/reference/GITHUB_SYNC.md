@@ -67,3 +67,26 @@ python pull_apply_remote.py madtwo/z-flip since_sha "D:/UE/z-flip"   # 备份+�
 标准 UE .gitignore(Binaries/Intermediate/Saved/DDC/.vs,Plugins/* 同理)+ 简短 README 分类表 → `git init -b main && git add -A && git commit` → 凭证管理器读 token → `POST /user/repos` 建私有仓库 → 先试 `git push`(代理开着时),connection reset 就直接跑 `reference/push_via_api.py`。
 
 现状:madtwo/MyProject2(私有)已建并同步;**z-flip 尚未建仓**,需要时复用脚本改 REPO/WORKDIR。
+
+
+## 建树 422「request timed out / input too large」→ 改用 **base_tree 增量推送**(2026-09-15 实测)
+
+**现象**:`POST /git/trees` 带**整棵树**(500 条目)返回
+`422 {"message":"Sorry, your request timed out. It's likely that your input was too large to process.
+Consider building the tree incrementally..."}` —— GitHub 侧处理超时。而 push 脚本对 409/422 只回
+`{"__conflict": True}`(body 被吞)→ 调用处 `tree["sha"]` 直接 `KeyError: 'sha'`,看不出真因。
+**排查第一步:把这个 body 打出来**(本轮就是靠它拿到官方建议)。
+
+**修法(官方建议)**:用 `base_tree` 只提交**变更条目** ——
+1. `GET /git/trees/<head>?recursive=1` → path→sha 字典;
+2. 本地 `git ls-files` 逐个算 blob sha,与远端不同才进 `tree`(顺带 GET 预检 blob,缺失才 POST 上传);
+3. `POST /git/trees {base_tree: <远端根树 sha>, tree: [变更条目]}`;
+4. `POST /git/commits(parents=[head])` + `PATCH /git/refs/heads/main`。
+   `base_tree` 未提及的远端条目**保留**(语义与整树重建等价);要**删除**必须显式给 `{"path":p,"mode":"100644","type":"blob","sha":null}`。
+**实测**:505 文件的仓库只推 **14 个变更条目**,几秒完成(整树法此前直接 422)。
+
+**脚本**:`reference/push_incremental.py`(已固化;`GS_ALLOW_DELETE=1` 才允许删"本地磁盘上仍存在"的远端文件,
+默认跳过——避免误删)。**验收标准不变**:`compare/<推前 head>...main` 的 `removed` 必须为 0 + 关键文件 blob sha 逐字节核对。
+
+**教训**:`git add -A` 会把工作区里**未跟踪的生成物**(如 `Content/_GENERATED/<用户名>/*` 的建模调试产物)
+一起提交并推给队友 —— 推前先看 `git status`,别用 `-A` 一把梭。
