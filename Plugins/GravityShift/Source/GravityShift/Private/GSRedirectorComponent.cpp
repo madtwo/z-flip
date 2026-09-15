@@ -86,6 +86,110 @@ bool UGSRedirectorComponent::IsBallTouchingChute(const USphereComponent& BallSph
 	return bHitChute;
 }
 
+// 特殊滑梯:面吸附触发(2026-09-15 用户需求)。
+// 判定链:两面垂直 → 球当前重力落在某一面 → 该面允许吸附进入 → 球心朝该面法线反向探到
+// **本滑梯** → 接触法线确实是这一面的 → (可选)球在沿面前进 → 速度达下限 → 交给 Pawn。
+// 关键区别:旧逻辑的 gate[side] 把"撞在竖直面上"整类拒掉,而面吸附要接的正是这一类。
+bool UGSRedirectorComponent::TryBeginFaceCapture(AGSRollingBallPawn& Ball, const USphereComponent& BallSphere,
+	const FVector& BallLoc, const FVector& Velocity, float Speed)
+{
+	if (Ball.IsFaceCapturing())
+	{
+		return false;
+	}
+	// 支撑门(复用同一批开关):空中擦过竖直面的球不吸附。
+	if (bRequireSupportToTrigger && Ball.LandingResponse)
+	{
+		if (!Ball.LandingResponse->IsSupported()
+			|| Ball.LandingResponse->GetAirborneSeconds() > MaxAirborneSecondsForTrigger)
+		{
+			return false;
+		}
+	}
+	if (Speed < MinTriggerSpeedCm)
+	{
+		return false;
+	}
+
+	const FVector DirA = GSGravity::DirectionToVector(GravityDirectionA).GetSafeNormal();
+	const FVector DirB = GSGravity::DirectionToVector(GravityDirectionB).GetSafeNormal();
+	if (FMath::Abs(FVector::DotProduct(DirA, DirB)) > 0.1f)
+	{
+		return false;
+	}
+
+	// 球当前重力落在哪一面:入口面就是它"骑着的"那一面。
+	const FVector BallGravity = Ball.GetActiveGravityDirection().GetSafeNormal();
+	const float DotA = FVector::DotProduct(BallGravity, DirA);
+	const float DotB = FVector::DotProduct(BallGravity, DirB);
+	const bool bEnterFromA = DotA >= DotB;
+	if (FVector::DotProduct(BallGravity, bEnterFromA ? DirA : DirB) < EntryFaceGravityMin)
+	{
+		return false;
+	}
+	if (!(bEnterFromA ? bCaptureEntryFromA : bCaptureEntryFromB))
+	{
+		return false;
+	}
+
+	// 出口面 = 另一面。入口 B(竖直面)时出口 A(平面)= 竖直向下:就是"转成重力向下"。
+	const FVector EntryGravity = bEnterFromA ? DirA : DirB;
+	const FVector ExitGravity = bEnterFromA ? DirB : DirA;
+	const FVector EntryFaceNormal = -EntryGravity;
+	const FVector ExitFaceNormal = -ExitGravity;
+
+	// 朝入口面法线的反向探一下,取回真实接触法线(必须命中的是本滑梯)。
+	const float Radius = BallSphere.GetScaledSphereRadius();
+	const float Reach = FMath::Max(Radius + ContactTouchMarginCm, 1.0f);
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(GSFaceCaptureEntry), false, BallSphere.GetOwner());
+	Params.AddIgnoredComponent(&BallSphere);
+	if (!GetWorld() || !GetWorld()->LineTraceSingleByChannel(Hit, BallLoc, BallLoc - EntryFaceNormal * Reach,
+		ECC_WorldStatic, Params))
+	{
+		return false;
+	}
+	if (Hit.GetActor() != GetOwner())
+	{
+		return false;
+	}
+
+	const FVector ContactNormal = Hit.Normal.GetSafeNormal();
+	if (FVector::DotProduct(ContactNormal, EntryFaceNormal) < FaceCaptureEntryNormalMin)
+	{
+		// 贴的不是这一面(例如从平面那侧擦过) → 交给原弯道逻辑。
+		return false;
+	}
+
+	// 沿面前进方向 = 旋转轴 × 接触法线(入口竖直面时朝上,出口平面时朝外)。
+	const FVector Axis = FVector::CrossProduct(EntryFaceNormal, ExitFaceNormal).GetSafeNormal();
+	const FVector ApproachDir = FVector::CrossProduct(Axis, ContactNormal).GetSafeNormal();
+	if (ApproachDir.IsNearlyZero())
+	{
+		return false;
+	}
+	if (FaceCaptureMinApproachSpeedCm > 0.0f
+		&& FVector::DotProduct(Velocity, ApproachDir) < FaceCaptureMinApproachSpeedCm)
+	{
+		return false;
+	}
+
+	Ball.BeginFaceCapture(GetOwner(), ContactNormal, ExitGravity, FaceCaptureSpeedCm,
+		FaceCaptureStickAccelCm, FaceCaptureExitNormalDot);
+
+	if (bDebugLog)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s face-capture: ball=(%.0f,%.0f,%.0f) n=(%.2f,%.2f,%.2f) %s→%s v=(%.0f,%.0f,%.0f)"),
+			*GetNameSafe(GetOwner()), BallLoc.X, BallLoc.Y, BallLoc.Z,
+			ContactNormal.X, ContactNormal.Y, ContactNormal.Z,
+			*GSGravity::GetDirectionDisplayName(bEnterFromA ? GravityDirectionA : GravityDirectionB),
+			*GSGravity::GetDirectionDisplayName(bEnterFromA ? GravityDirectionB : GravityDirectionA),
+			Velocity.X, Velocity.Y, Velocity.Z);
+	}
+	LastFireTime = GetWorld()->GetTimeSeconds();
+	return true;
+}
+
 void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
@@ -163,6 +267,23 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 
 	const FVector Velocity = Ball->GetBallLinearVelocity();
 	const float Speed = Velocity.Size();
+
+	// ---- 特殊滑梯:面吸附(只对勾了 bFaceCaptureMode 的滑梯生效)----
+	// 放在弯道判定之前:球"从侧面碰到竖直面"这一下,旧逻辑会走 gate[side] 直接拒掉,
+	// 面吸附模式要接住的正是这一下。命中后由 Pawn 逐帧驱动到平面并提交重力。
+	if (bFaceCaptureMode)
+	{
+		if (TryBeginFaceCapture(*Ball, *BallSphere, BallLoc, Velocity, Speed))
+		{
+			return;
+		}
+		if (!bFaceCaptureAlsoClassic)
+		{
+			// 没吸附上(例如从平面那侧滚过)就什么都不做:否则吸附刚把球送到平面上,
+			// 旧弯道逻辑会在同一帧又把它甩回墙上。
+			return;
+		}
+	}
 
 	// 调试:球在触发盒内时,把各门限的实测值逐帧打出来(定位"为什么不触发")。
 	const bool bGateDebug = bDebugLog;

@@ -121,6 +121,56 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "0.0"))
 	float SeparationRejectSpeedCm = 150.0f;
 
+	// ---- 特殊滑梯:面吸附模式(2026-09-15 用户需求,给关卡里那条独一无二的滑梯) ----
+	// 勾上后本转向器不再走"90° 弯道滑行",而是:球**碰到竖直面(垂直于地面的那一面)**
+	// → 吸附 → 沿曲面被自然带到平面(平行地面的那一面)→ 重力转成该面的重力(通常向下)。
+	// 与弯道滑行的区别:弯道滑行要求球已经骑在某一面上沿弧滚出;面吸附专门处理
+	// "从侧面撞上去"这件事——那一下在旧算法里恰恰被 gate[side] 拒掉。
+	// 只给特殊滑梯用:普通滑梯保持默认(不勾)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector")
+	bool bFaceCaptureMode = false;
+
+	// 允许从哪一面"吸附进入":默认只从 B 面(竖直面)进,A 面(平面)仍走原弯道滑行逻辑,
+	// 这样"从平面滚下来"那一侧的手感不受影响。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector")
+	bool bCaptureEntryFromA = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector")
+	bool bCaptureEntryFromB = true;
+
+	// 吸附后沿面驱动速度(cm/s)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "50.0"))
+	float FaceCaptureSpeedCm = 700.0f;
+
+	// 压向面的加速度(cm/s²):凸圆弧上球有被甩开的趋势,靠它摁住。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "0.0"))
+	float FaceCaptureStickAccelCm = 2500.0f;
+
+	// 重力转完所需路程(cm) ≈ 圆弧弧长(默认 180 ≈ R100 的四分之一弧)。走到平面正好转到位。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "10.0"))
+	float FaceCaptureRotateOverCm = 180.0f;
+
+	// 释放判定:接触法线与**出口面**法线的余弦 ≥ 该值(0.85 ≈ 32°)即认为已到平面。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "0.1", ClampMax = "0.999"))
+	float FaceCaptureExitNormalDot = 0.85f;
+
+	// 进入判定:接触法线与**入口面**法线的余弦下限(确认球确实贴在这一面上)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FaceCaptureEntryNormalMin = 0.6f;
+
+	// 进入判定:球速沿"沿面前进方向"的分量下限(cm/s)。默认 0 = 碰到就吸附
+	// (用户原话"碰到了就会被吸附上去");调到数百可要求"真的在往坡上滚"才吸附。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector")
+	float FaceCaptureMinApproachSpeedCm = 0.0f;
+
+	// 面吸附模式下是否**同时**保留旧的 90° 弯道逻辑(默认关)。
+	// 必须默认关的原因(2026-09-15 实测):吸附把球送到平面的那一帧,球正好贴着圆弧、
+	// 重力已转成 -Z,旧逻辑立刻判定"从平面进入"并又来一次 -Z→-Y 滑行,把刚送上平面的球
+	// 原路甩回墙上——用户要的"被带到平面上"当场被抵消。关掉后本滑梯只有面吸附这一套行为。
+	// (若哪天想让球从平面滚下来时也能贴到墙上,再把这个开关打开。)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector")
+	bool bFaceCaptureAlsoClassic = false;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Debug")
 	bool bDebugLog = false;
 
@@ -137,6 +187,12 @@ protected:
 	// 球面到滑梯表面的最近距离是否已进入容差(三个方向线探针取最小命中距离:
 	// 朝包围盒最近点 / 入口"下" / 出口"下");OutNormal 回传该接触面的法线。
 	bool IsBallTouchingChute(const class USphereComponent& BallSphere, const FVector& EntryUp, const FVector& ExitUp, FVector& OutNormal) const;
+
+	// 特殊滑梯:面吸附触发判定(bFaceCaptureMode 生效时走这里,不走上面的 90° 弯道逻辑)。
+	// 只认"球贴在本滑梯的入口面(默认 B 面=竖直面)上"这一种进入,命中则调 Pawn 的
+	// BeginFaceCapture 并把重力交给它逐帧旋转到出口面(默认 A 面=平面,即竖直向下)。
+	bool TryBeginFaceCapture(class AGSRollingBallPawn& Ball, const class USphereComponent& BallSphere,
+		const FVector& BallLoc, const FVector& Velocity, float Speed);
 
 	// 本组件是否正在驱动一次滑行(滑行期间不做重触发;球离开触发盒才释放)。
 	bool bRiding = false;
