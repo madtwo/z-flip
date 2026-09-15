@@ -8,6 +8,7 @@
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "UObject/ConstructorHelpers.h"
 
 #include "GSBlockBase.h"
@@ -58,6 +59,13 @@ AGSRollingBallPawn::AGSRollingBallPawn()
 	if (SphereAsset.Succeeded())
 	{
 		BallMesh->SetStaticMesh(SphereAsset.Object);
+	}
+
+	// 贴脸遮挡用的半透明材质(插件 Content,带 Opacity 标量参数)。缺失时退回老行为(整球隐藏)。
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> FadeMatAsset(TEXT("/GravityShift/Materials/M_GS_BallFade.M_GS_BallFade"));
+	if (FadeMatAsset.Succeeded())
+	{
+		BallMeshFadeMaterial = FadeMatAsset.Object;
 	}
 
 	// Default tuning DataAsset (created by generate_data_assets.py). The game mode
@@ -607,20 +615,20 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 	}
 	CameraArm->TargetArmLength = SmoothedArmLengthCm;
 
-	// 球贴脸遮挡:臂塌缩到极短时球占满画面中心,隐藏球网格让出视野(拉远自动恢复)。
-	// 瞄准态不隐藏(越肩偏移已让开视线,且球是瞄准姿态的一部分)。滞回防阈值附近闪烁;
+	// 球贴脸遮挡:臂塌缩到极短时球占满画面中心,把球调成半透明让出视野(拉远自动恢复)。
+	// 瞄准态不处理(越肩偏移已让开视线,且球是瞄准姿态的一部分)。滞回防阈值附近闪烁;
 	// 纯视觉调整,不影响物理/瞄准判定。
 	if (BallMesh)
 	{
 		if (!bAiming && !bBallMeshHidden && SmoothedArmLengthCm < BallMeshHideBelowArmCm)
 		{
 			bBallMeshHidden = true;
-			BallMesh->SetVisibility(false);
+			SetBallMeshFaded(true);
 		}
 		else if (bBallMeshHidden && (bAiming || SmoothedArmLengthCm > BallMeshShowAboveArmCm))
 		{
 			bBallMeshHidden = false;
-			BallMesh->SetVisibility(true);
+			SetBallMeshFaded(false);
 		}
 	}
 
@@ -686,6 +694,46 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 	// 供下一帧探针沿"相机真实朝向"打(1 帧滞后,避免与 LiftScale→AimPitchDeg 循环依赖)。
 	LastAimPitchDeg = AimPitchDeg;
 	CurrentCameraUp = CurrentCameraRotation.RotateVector(FVector::UpVector);
+}
+
+void AGSRollingBallPawn::SetBallMeshFaded(bool bFaded)
+{
+	if (!BallMesh)
+	{
+		return;
+	}
+
+	// 没配半透明材质:退回原来的"整球隐藏",功能不失效。
+	if (!BallMeshFadeMaterial)
+	{
+		BallMesh->SetVisibility(!bFaded);
+		return;
+	}
+
+	if (bFaded)
+	{
+		if (!BallMeshFadeMID)
+		{
+			BallMeshFadeMID = UMaterialInstanceDynamic::Create(BallMeshFadeMaterial, this);
+		}
+		if (!BallMeshFadeMID)
+		{
+			BallMesh->SetVisibility(false);
+			return;
+		}
+		if (!BallMeshOriginalMaterial)
+		{
+			BallMeshOriginalMaterial = BallMesh->GetMaterial(0);
+		}
+		BallMeshFadeMID->SetScalarParameterValue(TEXT("Opacity"), BallMeshFadeOpacity);
+		BallMesh->SetVisibility(true);
+		BallMesh->SetMaterial(0, BallMeshFadeMID);
+	}
+	else if (BallMeshOriginalMaterial)
+	{
+		BallMesh->SetMaterial(0, BallMeshOriginalMaterial);
+		BallMesh->SetVisibility(true);
+	}
 }
 
 void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)

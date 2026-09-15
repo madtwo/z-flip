@@ -11,6 +11,8 @@
 class AGSGravityManager;
 class AGSWorldStateManager;
 class UCameraComponent;
+class UMaterialInstanceDynamic;
+class UMaterialInterface;
 class UGSBallProfile;
 class AGSBlockBase;
 class UGSGravityBodyComponent;
@@ -328,13 +330,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0"))
 	float CameraProbeMarginCm = 12.0f;
 
-	// 球贴脸遮挡:臂塌缩到 Hide 以下(球占满画面)时隐藏球网格,回到 Show 以上恢复。
-	// 纯视觉,不影响物理;瞄准中(有越肩偏移让开视线)不隐藏。滞回防阈值附近闪烁。
+	// 球贴脸遮挡:臂塌缩到 Hide 以下(球占满画面)时把球调成半透明,回到 Show 以上恢复。
+	// 纯视觉,不影响物理;瞄准中(有越肩偏移让开视线)不处理。滞回防阈值附近闪烁。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0"))
 	float BallMeshHideBelowArmCm = 230.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0"))
 	float BallMeshShowAboveArmCm = 300.0f;
+
+	// 贴脸时球的不透明度(0.5 = 50% 透明)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float BallMeshFadeOpacity = 0.5f;
+
+	// 贴脸时换上的半透明材质(需带 Opacity 标量参数)。为空则退回"整球隐藏"的老行为。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera")
+	TObjectPtr<UMaterialInterface> BallMeshFadeMaterial = nullptr;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Interaction", meta = (ClampMin = "0.0"))
 	float InteractionRadiusCm = 320.0f;
@@ -427,6 +437,13 @@ public:
 
 	// 球网格隐藏滞回状态(瞬时,非反射)。
 	bool bBallMeshHidden = false;
+
+	// 半透明用的动态材质实例 + 球原本的材质(退出贴脸时还原)。
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> BallMeshFadeMID = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInterface> BallMeshOriginalMaterial = nullptr;
 
 	// ---- 转向器过渡状态(瞬时,非反射) ----
 	bool bGravityRedirectActive = false;
@@ -543,6 +560,9 @@ protected:
 	// G 翻转(上轴 ±Z 互换)不改变航向 → 视角翻转后仍对准同一个世界方向。
 	FVector CameraAimHeading = FVector::ForwardVector;
 	void UpdateCamera(float DeltaSeconds);
+
+	// 贴脸遮挡:按开关换/还原球网格的半透明材质(没配材质则退回整球隐藏)。
+	void SetBallMeshFaded(bool bFaded);
 	void ApplyMovement(float DeltaSeconds);
 	void PollNativeInput();
 	// 新瞄准机制:每 tick 更新 RMB 瞄准状态/中心射线/高亮切换;锁定时左键翻转方块重力。

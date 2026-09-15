@@ -239,14 +239,15 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 
 	// **只有碰到"正面接地那一块"才触发**(用户要求):球心到入口侧面(地面/墙/天花板
 	// 那一侧的面)的距离 ≤ 球半径 + EntryLipBandCm 才算碰在圆弧接地处;碰在滑梯顶面/
-	// 背面等其它位置不触发。入口侧面 = 网格包围盒朝入口面那一侧的支撑面
-	// (入口重力朝哪边,就取那一侧的面)。
-	const FVector Extent = MeshBounds.GetExtent();
-	const FVector LipAnchor = MeshBounds.GetCenter() + FVector(
-		FMath::Abs(EntryGravity.X) > 0.5f ? FMath::Sign(EntryGravity.X) * Extent.X : 0.0f,
-		FMath::Abs(EntryGravity.Y) > 0.5f ? FMath::Sign(EntryGravity.Y) * Extent.Y : 0.0f,
-		FMath::Abs(EntryGravity.Z) > 0.5f ? FMath::Sign(EntryGravity.Z) * Extent.Z : 0.0f);
-	const float DistToLipCm = FMath::Abs(FVector::DotProduct(BallLoc - LipAnchor, EntryGravity));
+	// 背面等其它位置不触发。入口侧面 = 网格包围盒沿入口重力轴**离球最近的那一侧**面。
+	// 2026-09-15:原先硬取"入口重力指向的那一侧"(Center + Sign(N)*Extent),只对
+	// "滑梯坐在球的支撑面上"那种摆法成立(球贴包围盒底面,如 LDI_Gravityshift);
+	// 弯道往反方向卷时(如平台外圆角 Blockout_Corner_Curved:球骑在包围盒**顶面**,
+	// 弧往下卷)会取到对面那侧 → 实测 DistToLip=276 ≫ R+60=110,正常触发全被
+	// gate[lip] 拒掉。改成按球实际在哪一侧选面,两种摆法都对,原摆法结果不变。
+	const float SignedCm = FVector::DotProduct(BallLoc - MeshBounds.GetCenter(), EntryGravity);
+	const float ExtentAlongGravityCm = FMath::Abs(FVector::DotProduct(MeshBounds.GetExtent(), EntryGravity));
+	const float DistToLipCm = FMath::Abs(FMath::Abs(SignedCm) - ExtentAlongGravityCm);
 	const float Radius = BallSphere->GetScaledSphereRadius();
 	if (DistToLipCm > Radius + EntryLipBandCm)
 	{
