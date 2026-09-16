@@ -8,6 +8,7 @@
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "UObject/ConstructorHelpers.h"
 
 #include "GSBlockBase.h"
@@ -58,6 +59,13 @@ AGSRollingBallPawn::AGSRollingBallPawn()
 	if (SphereAsset.Succeeded())
 	{
 		BallMesh->SetStaticMesh(SphereAsset.Object);
+	}
+
+	// 贴脸遮挡用的半透明材质(插件 Content,带 Opacity 标量参数)。缺失时退回老行为(整球隐藏)。
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> FadeMatAsset(TEXT("/GravityShift/Materials/M_GS_BallFade.M_GS_BallFade"));
+	if (FadeMatAsset.Succeeded())
+	{
+		BallMeshFadeMaterial = FadeMatAsset.Object;
 	}
 
 	// Default tuning DataAsset (created by generate_data_assets.py). The game mode
@@ -445,6 +453,317 @@ void AGSRollingBallPawn::UpdateGravityRedirect(float DeltaSeconds)
 	}
 }
 
+// ============================ 特殊滑梯:面吸附 ============================
+// 和"弯道滑行"是两套算法:弯道滑行假设球已经骑在弯道某一面上、沿 90° 弧滚出去,方向由
+// "入口上行轴×出口上行轴"推导;面吸附处理的是"球碰到竖直面(垂直于地面的那一面)"这一下:
+// 碰到就吸附,沿曲面切向把它自然带到平面(平行地面的那一面),走到平面时重力正好转到位。
+// 触发由 UGSRedirectorComponent 的 bFaceCaptureMode 负责,只给关卡里那条特殊滑梯用。
+void AGSRollingBallPawn::BeginFaceCapture(AActor* ChuteActor, FVector ContactNormal, FVector ExitGravity,
+	float DriveSpeedCm, float StickAccelCm, float ExitNormalDot,
+	bool bGrounded, float FloorSpeedCm, float CeilSpeedCm)
+{
+	const FVector Normal = ContactNormal.GetSafeNormal();
+	const FVector Target = ExitGravity.GetSafeNormal();
+	if (!ChuteActor || !BallCollision || Normal.IsNearlyZero() || Target.IsNearlyZero())
+	{
+		return;
+	}
+
+	// 出口面法线 = 出口重力的反向;旋转轴 = 两面法线的叉积(这段圆弧就是绕它卷的)。
+	const FVector ExitNormal = -Target;
+	const FVector Axis = FVector::CrossProduct(Normal, ExitNormal).GetSafeNormal();
+	if (Axis.IsNearlyZero())
+	{
+		// 两面平行:构不成"从侧面被带到平面上",不接管。
+		return;
+	}
+
+	bFaceCaptureActive = true;
+	FaceCaptureActor = ChuteActor;
+	FaceCaptureEntryNormal = Normal;
+	FaceCaptureExitNormal = ExitNormal;
+	FaceCaptureAxis = Axis;
+	FaceCaptureCurrentNormal = Normal;
+	FaceCaptureGravityFrom = GetActiveGravityDirection().GetSafeNormal();
+	FaceCaptureGravityTo = Target;
+	FaceCaptureGravityCurrent = FaceCaptureGravityFrom;
+	FaceCaptureSpeedCm = FMath::Max(DriveSpeedCm, 50.0f);
+	FaceCaptureStickAccelCm = FMath::Max(StickAccelCm, 0.0f);
+	FaceCaptureExitNormalDot = FMath::Clamp(ExitNormalDot, 0.1f, 0.999f);
+	FaceCaptureElapsedSeconds = 0.0f;
+	bFaceCaptureGravityCommitted = false;
+	bFaceCaptureGrounded = bGrounded;
+	FaceCaptureFloorSpeedCm = FMath::Max(FloorSpeedCm, 1.0f);
+	FaceCaptureCeilSpeedCm = FMath::Max(CeilSpeedCm, FaceCaptureFloorSpeedCm);
+	FaceCaptureSurfaceLostAcc = 0.0f;
+
+	// 入口法线不一定正好在"入口面法线"上:球快的时候一帧就跨过平面的那一段,是在圆弧中段
+	// 被接住的。这时**已经扫过**一段弧(θ0),把它换算成路程预先记上——重力旋转才会恰好在
+	// "接触法线到达出口面"的同一刻转完;否则收尾会变成"重力还没转完就被硬提交"的一跳。
+	//   EntryAngleDeg = 入口法线到**出口**法线的夹角 = 还**剩**多少度没扫(不是扫过的!)
+	//   扫过的 θ0 = 90° − EntryAngleDeg
+	// (⚠ 首版写反过:直接拿 EntryAngleDeg 当初值 → 一进吸附重力就跳完 87% 再慢慢补,
+	//  相机在进入瞬间被猛拽一下;2026-09-16 高速实测 entryAngle=79° 时暴露。)
+	const float EntryAngleDeg = FMath::RadiansToDegrees(
+		FMath::Acos(FMath::Clamp(FVector::DotProduct(Normal, ExitNormal), -1.0f, 1.0f)));
+	const float SweptAngleDeg = FMath::Clamp(90.0f - EntryAngleDeg, 0.0f, 90.0f);
+	FaceCapturePathCm = FaceCaptureRotateOverCm * (SweptAngleDeg / 90.0f);
+
+	// 进入这一帧就把球摁到面上并换上"沿面前进"的速度:否则球还带着离开面的速度,
+	// 会先弹出去再被拉回来,看起来就是"卡一下"。
+	// 温和吸附(球自己滚进圆弧)不能这么干——它本来就在好好滚,定速会把它拽一下;
+	// 只保留"沿面"那一半速度、切掉"正在离开面"的那一半即可。
+	const FVector Tangent = FVector::CrossProduct(FaceCaptureAxis, FaceCaptureCurrentNormal).GetSafeNormal();
+	const float EntrySpeedCm = BallCollision->GetPhysicsLinearVelocity().Size();
+	if (BallCollision->IsSimulatingPhysics())
+	{
+		BallCollision->WakeRigidBody();
+		if (!Tangent.IsNearlyZero())
+		{
+			if (bFaceCaptureGrounded)
+			{
+				const FVector EntryVelocity = BallCollision->GetPhysicsLinearVelocity();
+				const float TangentialSpeed = FMath::Clamp(FVector::DotProduct(EntryVelocity, Tangent),
+					FaceCaptureFloorSpeedCm, FaceCaptureCeilSpeedCm);
+				const float InwardSpeed = FMath::Min(FVector::DotProduct(EntryVelocity, FaceCaptureCurrentNormal), 0.0f);
+				BallCollision->SetPhysicsLinearVelocity(Tangent * TangentialSpeed + FaceCaptureCurrentNormal * InwardSpeed);
+			}
+			else
+			{
+				BallCollision->SetPhysicsLinearVelocity(Tangent * FaceCaptureSpeedCm);
+			}
+		}
+	}
+	if (GravityBody)
+	{
+		GravityBody->SetGravityDirectionOverride(FaceCaptureGravityCurrent);
+	}
+
+	if (bFaceCaptureDebugLog)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[GSFaceCapture] begin chute=%s style=%s n=(%.2f,%.2f,%.2f) exitG=(%.2f,%.2f,%.2f) axis=(%.2f,%.2f,%.2f) speed=%.0f floor=%.0f ceil=%.0f entryAngle=%.0fdeg entryV=%.0f"),
+			*GetNameSafe(ChuteActor), bFaceCaptureGrounded ? TEXT("grounded") : TEXT("hard"),
+			Normal.X, Normal.Y, Normal.Z,
+			Target.X, Target.Y, Target.Z, Axis.X, Axis.Y, Axis.Z,
+			FaceCaptureSpeedCm, FaceCaptureFloorSpeedCm, FaceCaptureCeilSpeedCm,
+			EntryAngleDeg, EntrySpeedCm);
+	}
+}
+
+void AGSRollingBallPawn::EndFaceCapture()
+{
+	if (!bFaceCaptureActive)
+	{
+		return;
+	}
+
+	// 重力补完再放开:中途释放会留下一个介于两个面之间的重力方向。
+	FaceCaptureGravityCurrent = FaceCaptureGravityTo;
+	if (!bFaceCaptureGravityCommitted && GravityManager)
+	{
+		bFaceCaptureGravityCommitted = true;
+		GravityManager->RequestGravityDirection(
+			GSGravity::VectorToDirection(FaceCaptureGravityTo), this, EGSGravityChangeReason::SCRIPTED, true);
+	}
+	if (GravityBody)
+	{
+		GravityBody->SetGravityDirectionOverride(FVector::ZeroVector);
+	}
+
+	bFaceCaptureActive = false;
+	FaceCaptureActor = nullptr;
+	FaceCapturePathCm = 0.0f;
+	FaceCaptureElapsedSeconds = 0.0f;
+	FaceCaptureReleaseTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+
+	if (bFaceCaptureDebugLog)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[GSFaceCapture] end gravity=(%.2f,%.2f,%.2f)"),
+			FaceCaptureGravityTo.X, FaceCaptureGravityTo.Y, FaceCaptureGravityTo.Z);
+	}
+}
+
+FVector AGSRollingBallPawn::GetFaceCaptureNormal() const
+{
+	return bFaceCaptureActive ? FaceCaptureCurrentNormal : FVector::ZeroVector;
+}
+
+bool AGSRollingBallPawn::IsFaceCaptureCoolingDown() const
+{
+	if (FaceCaptureReleaseCooldownSeconds <= 0.0f)
+	{
+		return false;
+	}
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+	return (World->GetTimeSeconds() - FaceCaptureReleaseTime) < FaceCaptureReleaseCooldownSeconds;
+}
+
+void AGSRollingBallPawn::UpdateFaceCapture(float DeltaSeconds)
+{
+	if (!bFaceCaptureActive)
+	{
+		return;
+	}
+
+	const float Dt = FMath::Clamp(DeltaSeconds, 0.0f, 0.1f);
+	FaceCaptureElapsedSeconds += Dt;
+
+	if (!BallCollision || !BallCollision->IsSimulatingPhysics() || !FaceCaptureActor)
+	{
+		EndFaceCapture();
+		return;
+	}
+
+	const float Radius = BallCollision->GetScaledSphereRadius();
+	const FVector BallLoc = BallCollision->GetComponentLocation();
+
+	// 1) 沿"当前接触法线"反向探面,取回真实曲面法线。凸圆弧上球一离面,理想弧线就带不住
+	//    它了——真实法线才是驱动方向,这一步是"贴着布尔网格走完"的关键(与滑行同源)。
+	float GapCm = 0.0f;
+	bool bHasSurface = false;
+	if (const UWorld* World = GetWorld())
+	{
+		FHitResult Hit;
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(GSFaceCaptureProbe), false, this);
+		if (World->LineTraceSingleByChannel(Hit, BallLoc,
+			BallLoc - FaceCaptureCurrentNormal * (Radius + FaceCaptureProbeReachCm), ECC_Visibility, Params))
+		{
+			const FVector HitNormal = Hit.Normal.GetSafeNormal();
+			// 本滑梯件的面直接用;**不是本滑梯件**但法线跟当前法线足够连续(同一张连续曲面的
+			// 邻接网格,例如墙角那面墙、叠着摆的另一个滑梯件)也接受 —— 见头文件说明:
+			// 否则球绕到墙角时法线冻结、出口判定永远不满足,会被恒速甩飞。
+			if (Hit.GetActor() == FaceCaptureActor
+				|| FVector::DotProduct(HitNormal, FaceCaptureCurrentNormal) >= FaceCaptureSurfaceNormalMinDot)
+			{
+				bHasSurface = true;
+				GapCm = Hit.Distance - Radius;
+				FaceCaptureCurrentNormal = HitNormal;
+			}
+		}
+	}
+
+	// 连续面也找不到的累计时长:超过阈值就放开(补完重力),不让"法线冻结+恒速切向"把球甩飞。
+	FaceCaptureSurfaceLostAcc = bHasSurface ? 0.0f : (FaceCaptureSurfaceLostAcc + Dt);
+	if (FaceCaptureSurfaceLostAcc >= FaceCaptureSurfaceLostSeconds)
+	{
+		EndFaceCapture();
+		if (bFaceCaptureDebugLog)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[GSFaceCapture] release reason=surface-lost(both own & continuous) elapsed=%.2fs"),
+				FaceCaptureElapsedSeconds);
+		}
+		return;
+	}
+
+	// 2) 沿面切向 = (旋转轴 × 当前法线):入口竖直面时朝上,出口平面时朝外,
+	//    方向随法线连续旋转——"被自然而然地带到平面上"就是这一条。
+	const FVector Tangent = FVector::CrossProduct(FaceCaptureAxis, FaceCaptureCurrentNormal).GetSafeNormal();
+	if (Tangent.IsNearlyZero())
+	{
+		EndFaceCapture();
+		return;
+	}
+
+	// 3) 速度 = 切向驱动 + 法向合拢(离面就把球拉回来;凸面上被甩开的趋势也吃这一步)。
+	//    温和吸附里"切向驱动"不是定速,而是球自己的切向速度钳进 [floor, ceil]:球滚得快就
+	//    走快、重力也随路程转得快(不会出现"球还在坡上重力已转完"),滚得慢就由下限兜底。
+	//    法向只切掉"正在离开面"的那一半(>0 的分量),再加一点随间隙的合拢——比硬吸附轻,
+	//    但同样不允许它自己飞离弧面。
+	float DriveSpeedCm = FaceCaptureSpeedCm;
+	float NormalSpeed = 0.0f;
+	if (bFaceCaptureGrounded)
+	{
+		const FVector CurrentVelocity = BallCollision->GetPhysicsLinearVelocity();
+		DriveSpeedCm = FMath::Clamp(FVector::DotProduct(CurrentVelocity, Tangent),
+			FaceCaptureFloorSpeedCm, FaceCaptureCeilSpeedCm);
+		NormalSpeed = FMath::Min(FVector::DotProduct(CurrentVelocity, FaceCaptureCurrentNormal), 0.0f);
+		if (bHasSurface)
+		{
+			// **这一帧就把间隙合上**(而不是按间隙比例给一点力)。凸圆弧上球每帧会按 v²/ρ 往外
+			// 飘——900cm/s、R≈111 时约 0.7cm/帧;旧写法(Gap*Gain, gain=8)只能补 0.1cm/帧,
+			// 追不上,球就会越飘越远直到脱面(用户反馈"跑太快会飞出去"的主因)。
+			// 负间隙(压进面里)时 -Gap/Dt 为正,被 min 挡住 → 不会往外推,只收不放。
+			NormalSpeed = FMath::Min(NormalSpeed, -GapCm / Dt);
+			NormalSpeed = FMath::Max(NormalSpeed, -FaceCaptureCeilSpeedCm);
+		}
+	}
+	else
+	{
+		NormalSpeed = bHasSurface
+			? FMath::Clamp(-GapCm * FaceCaptureGapGain, -FaceCaptureSpeedCm, FaceCaptureSpeedCm)
+			: 0.0f;
+	}
+	BallCollision->WakeRigidBody();
+	BallCollision->SetPhysicsLinearVelocity(Tangent * DriveSpeedCm + FaceCaptureCurrentNormal * NormalSpeed);
+	if (FaceCaptureStickAccelCm > 0.0f)
+	{
+		BallCollision->AddForce(-FaceCaptureCurrentNormal * FaceCaptureStickAccelCm, NAME_None, true);
+	}
+
+	// 4) 重力按走过的路程旋转(与转向器滑行同一节奏:走到平面 = 正好转到位)。
+	FaceCapturePathCm += DriveSpeedCm * Dt;
+	const float Alpha = FMath::Clamp(FaceCapturePathCm / FMath::Max(FaceCaptureRotateOverCm, 1.0f), 0.0f, 1.0f);
+	const float Eased = Alpha * Alpha * (3.0f - 2.0f * Alpha);
+	const FQuat Delta = FQuat::FindBetweenNormals(FaceCaptureGravityFrom, FaceCaptureGravityTo);
+	FaceCaptureGravityCurrent = FQuat::Slerp(FQuat::Identity, Delta, Eased).RotateVector(FaceCaptureGravityFrom);
+	if (GravityBody)
+	{
+		GravityBody->SetGravityDirectionOverride(FaceCaptureGravityCurrent);
+	}
+
+	// 5) 出口:接触法线转到"出口面朝上"→ 提交重力并释放,球带着切向速度滚上平面。
+	//    超时是保险(面被卡住/组件异常时不会永久夺走玩家控制)。
+	const float ExitDot = FVector::DotProduct(FaceCaptureCurrentNormal, FaceCaptureExitNormal);
+	const bool bReachedExit = ExitDot >= FaceCaptureExitNormalDot;
+	const bool bTimedOut = FaceCaptureElapsedSeconds >= FaceCaptureMaxSeconds;
+	if (bReachedExit || bTimedOut)
+	{
+		const float ElapsedForLog = FaceCaptureElapsedSeconds;
+		EndFaceCapture();
+		if (bFaceCaptureDebugLog)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[GSFaceCapture] release dot=%.2f elapsed=%.2fs reason=%s"),
+				ExitDot, ElapsedForLog, bReachedExit ? TEXT("reached-plane") : TEXT("timeout"));
+		}
+		return;
+	}
+
+	if (bFaceCaptureDebugLog)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[GSFaceCapture] t=%.2f ball=(%.0f,%.0f,%.0f) n=(%.2f,%.2f,%.2f) tan=(%.2f,%.2f,%.2f) g=(%.2f,%.2f,%.2f) gap=%.0f surf=%d prog=%.0f/%.0f"),
+			FaceCaptureElapsedSeconds, BallLoc.X, BallLoc.Y, BallLoc.Z,
+			FaceCaptureCurrentNormal.X, FaceCaptureCurrentNormal.Y, FaceCaptureCurrentNormal.Z,
+			Tangent.X, Tangent.Y, Tangent.Z,
+			FaceCaptureGravityCurrent.X, FaceCaptureGravityCurrent.Y, FaceCaptureGravityCurrent.Z,
+			GapCm, bHasSurface ? 1 : 0,
+			FaceCapturePathCm, FaceCaptureRotateOverCm);
+	}
+}
+
+// 与上轴最不平行的世界参考轴。
+// ⚠ 2026-09-15 用户"墙态重力下完全转不动"的根因:参考硬编码成世界 +X,而上轴正好是 ±X
+// (球在竖墙上、重力 ±X)时,"+X 投影到 ⊥上轴平面"= 零向量 → 相机姿态算废 → 画面乱转/不转。
+static FVector GSPickReferenceAxis(const FVector& Up)
+{
+	const FVector Axes[3] = { FVector::ForwardVector, FVector::RightVector, FVector::UpVector };
+	int32 BestIdx = 0;
+	float BestAlign = 2.0f;
+	for (int32 i = 0; i < 3; ++i)
+	{
+		const float Align = FMath::Abs(FVector::DotProduct(Axes[i], Up));
+		if (Align < BestAlign)
+		{
+			BestAlign = Align;
+			BestIdx = i;
+		}
+	}
+	return Axes[BestIdx];
+}
+
 FQuat AGSRollingBallPawn::BuildCameraRotation(const FVector& UpVector, float AdditionalPitchDegrees) const
 {
 	FVector Up = UpVector.GetSafeNormal();
@@ -460,9 +779,13 @@ FQuat AGSRollingBallPawn::BuildCameraRotation(const FVector& UpVector, float Add
 	Forward = Forward.GetSafeNormal();
 	if (Forward.IsNearlyZero())
 	{
-		// 航向几乎平行于上轴(比如墙态重力):退化到世界前向的投影。
-		Forward = FVector::ForwardVector - Up * FVector::DotProduct(FVector::ForwardVector, Up);
-		Forward = Forward.GetSafeNormal();
+		// 航向几乎平行于上轴(比如墙态重力):退化到"与上轴最不平行的世界轴"的投影。
+		const FVector Ref = GSPickReferenceAxis(Up);
+		Forward = (Ref - Up * FVector::DotProduct(Ref, Up)).GetSafeNormal();
+		if (Forward.IsNearlyZero())
+		{
+			Forward = FVector::RightVector;
+		}
 	}
 	const FVector Right = FVector::CrossProduct(Up, Forward).GetSafeNormal();
 
@@ -607,25 +930,55 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 	}
 	CameraArm->TargetArmLength = SmoothedArmLengthCm;
 
-	// 球贴脸遮挡:臂塌缩到极短时球占满画面中心,隐藏球网格让出视野(拉远自动恢复)。
-	// 瞄准态不隐藏(越肩偏移已让开视线,且球是瞄准姿态的一部分)。滞回防阈值附近闪烁;
-	// 纯视觉调整,不影响物理/瞄准判定。
+	// 球贴脸遮挡:球在画面上占太大时把球调成半透明让出视野(2026-09-15 用户反馈
+	// "挡住屏幕大块部分却不变半透明"——只看臂长不够:球大/视场窄时臂还很长就已经糊住
+	// 半屏)。改判**角半径** asin(球半径/相机到球距离),与臂长阈值是"或"关系;滞回防抖。
+	// 2026-09-15 二次修订:原实现"瞄准态不处理",而瞄准臂只有 250cm 且 FOV 收窄——球又大
+	// 又近,恰恰是最挡视野的时机,用户实测"按住右键挡住大半屏却不淡出"。改为瞄准态同样淡出
+	// (bFadeBallWhileAiming,默认开;关掉即回到旧行为)。纯视觉,不影响物理/瞄准判定。
 	if (BallMesh)
 	{
-		if (!bAiming && !bBallMeshHidden && SmoothedArmLengthCm < BallMeshHideBelowArmCm)
+		const FVector CamLoc = CameraArm ? CameraArm->GetSocketLocation(NAME_None) : GetActorLocation();
+		const float DistToBallCm = FMath::Max((BallLoc - CamLoc).Size(), 1.0f);
+		const float BallRadiusCm = BallCollision ? BallCollision->GetScaledSphereRadius() : 40.0f;
+		const float BallAngleDeg = FMath::RadiansToDegrees(
+			FMath::Asin(FMath::Clamp(BallRadiusCm / DistToBallCm, 0.0f, 1.0f)));
+		// 视场越窄,同样的角半径占屏越大(瞄准 ADS 会把 FOV 收窄):阈值按 FOV/90 等比收,
+		// 否则"瞄准时球糊住半屏"仍然不触发。相机缺失时按 90° 基准。
+		const float FovDeg = Camera ? FMath::Max(Camera->FieldOfView, 20.0f) : 90.0f;
+		const float FadeAngleScale = FMath::Clamp(FovDeg / 90.0f, 0.45f, 1.4f);
+		const bool bBallTooBig = BallAngleDeg >= BallMeshFadeStartAngleDeg * FadeAngleScale
+			|| SmoothedArmLengthCm < BallMeshHideBelowArmCm;
+		const bool bBallSmallEnough = BallAngleDeg <= BallMeshFadeEndAngleDeg * FadeAngleScale
+			&& SmoothedArmLengthCm > BallMeshShowAboveArmCm;
+		// 瞄准且关掉了"瞄准也淡出"时,恢复原材质(不能在瞄准中保持半透明)。
+		const bool bFadeSuppressed = bAiming && !bFadeBallWhileAiming;
+		if (!bFadeSuppressed && !bBallMeshHidden && bBallTooBig)
 		{
 			bBallMeshHidden = true;
-			BallMesh->SetVisibility(false);
+			SetBallMeshFaded(true);
 		}
-		else if (bBallMeshHidden && (bAiming || SmoothedArmLengthCm > BallMeshShowAboveArmCm))
+		else if (bBallMeshHidden && (bFadeSuppressed || bBallSmallEnough))
 		{
 			bBallMeshHidden = false;
-			BallMesh->SetVisibility(true);
+			SetBallMeshFaded(false);
 		}
 	}
 
 	const float LiftScale = FMath::Clamp(SmoothedArmLengthCm / FMath::Max(CameraArmLengthCm, 1.0f), 0.0f, 1.0f);
-	const FVector TargetPivot = BallLoc + CameraLiftDirection * CameraPivotLiftHeightCm * LiftScale;
+	// 挤窄兜底:臂越短,额外抬得越高(球糊屏 → 改成从球上方俯看,并绕开背后的墙)。
+	const float SqueezeScale = 1.0f - LiftScale;
+	const float SqueezeLiftCm = SqueezeScale * CameraSqueezeLiftCm;
+	// 挤窄时的视场补偿:拉宽 FOV 让玩家还能看见周围(不动俯仰、不穿模)。写在 UpdateCamera
+	// 里、位于 UpdateAiming 之后,所以这里最后写谁生效的约定同样适用。
+	if (Camera && CameraSqueezeFovBoostDeg > 0.0f)
+	{
+		const float BaseFov = bAiming ? AimTargetFOV : DefaultCameraFOV;
+		const float SqueezeFov = BaseFov + SqueezeScale * CameraSqueezeFovBoostDeg;
+		Camera->FieldOfView = FMath::FInterpTo(Camera->FieldOfView, SqueezeFov, DeltaSeconds, 6.0f);
+	}
+	const FVector TargetPivot = BallLoc
+		+ CameraLiftDirection * (CameraPivotLiftHeightCm * LiftScale + SqueezeLiftCm);
 	// 位置指数平滑:G 的平移过渡/翻滚带抖动都被滤掉(导轨相机同款手法)。
 	if (!bPivotSmoothed)
 	{
@@ -658,34 +1011,178 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 	HeadingHoriz = HeadingHoriz.GetSafeNormal();
 	if (HeadingHoriz.IsNearlyZero())
 	{
-		HeadingHoriz = FVector::ForwardVector - TargetCameraUp * FVector::DotProduct(FVector::ForwardVector, TargetCameraUp);
-		HeadingHoriz = HeadingHoriz.GetSafeNormal();
+		// 同上:上轴 = ±X 时不能拿 +X 当参考(投影为零 → 姿态/俯仰全废)。
+		const FVector Ref = GSPickReferenceAxis(TargetCameraUp);
+		HeadingHoriz = (Ref - TargetCameraUp * FVector::DotProduct(Ref, TargetCameraUp)).GetSafeNormal();
+		if (HeadingHoriz.IsNearlyZero())
+		{
+			HeadingHoriz = FVector::RightVector;
+		}
 	}
+	// **每帧**把"去掉竖直分量"的航向存回(投影是幂等操作,不会改变正常航向的方向):
+	// 不这么做的话,航向在被"绕当前(俯仰/过渡中倾斜的)上轴"旋转时会慢慢积累竖直分量,
+	// 最终与上轴近乎平行 → 偏航退化(用户实测"往右拽不动、只能往左")。2026-09-15。
+	CameraAimHeading = HeadingHoriz;
 	// 用平滑后的实际臂长(不是配置的 700):臂长塌缩时瞄准点仍落在同一世界位置,
 	// 画面俯仰不会随探针收短而摆动(爬楼梯时相机贴近,旧写法会甩一下)。
 	const FVector CamPosApprox = Location - HeadingHoriz * SmoothedArmLengthCm;
 	const FVector LookDir = (AimTarget - CamPosApprox).GetSafeNormal();
-	const float AimPitchDeg = FMath::RadiansToDegrees(
+	float AimPitchDeg = FMath::RadiansToDegrees(
 		FMath::Asin(FMath::Clamp(FVector::DotProduct(LookDir, TargetCameraUp), -1.0f, 1.0f)));
+	// 挤窄时衰减瞄准俯仰(见头文件 CameraSqueezeAimPitchScale 说明):否则相机在窄处永远低头,
+	// 玩家想平视/看向前方某个方向时"怎么拖都转不过去"。满臂时 LiftScale=1 → 完全不衰减。
+	AimPitchDeg *= FMath::Lerp(CameraSqueezeAimPitchScale, 1.0f, LiftScale);
 
 	if (bFallbackCamDebugLog)
 	{
 		// 逐帧落盘(爬楼梯抖动诊断):ballZ=物理输入,pivot=平滑后,target=平滑前,
 		// cam=弹簧臂实测相机位(含探针压臂),arm/scale=探针压臂与抬升缩放,pitch=瞄准俯仰。
 		const FVector CamNow = CameraArm->GetSocketLocation(NAME_None);
-		UE_LOG(LogTemp, Log, TEXT("[FallbackCam] t=%06.2f dt=%.4f ballZ=%.1f pivot=(%.1f,%.1f,%.1f) target=(%.1f,%.1f,%.1f) cam=(%.1f,%.1f,%.1f) arm=%.1f raw=%.1f hit=%s scale=%.2f pitch=%.2f"),
+		// 补:重力方向 / 是否支撑 / 相机上向量 —— 排查"墙态重力下转不动"必需(2026-09-15)。
+		const FVector DbgG = GetActiveGravityDirection();
+		const FVector DbgCamUp = CurrentCameraRotation.RotateVector(FVector::UpVector);
+		UE_LOG(LogTemp, Log, TEXT("[FallbackCam] t=%06.2f dt=%.4f ballZ=%.1f g=(%.2f,%.2f,%.2f) sup=%d camup=(%.2f,%.2f,%.2f) pivot=(%.1f,%.1f,%.1f) target=(%.1f,%.1f,%.1f) cam=(%.1f,%.1f,%.1f) arm=%.1f raw=%.1f hit=%s scale=%.2f pitch=%.2f"),
 			GetWorld()->GetTimeSeconds(), DeltaSeconds,
 			BallLoc.Z,
+			DbgG.X, DbgG.Y, DbgG.Z,
+			(LandingResponse && LandingResponse->IsSupported()) ? 1 : 0,
+			DbgCamUp.X, DbgCamUp.Y, DbgCamUp.Z,
 			Location.X, Location.Y, Location.Z,
 			TargetPivot.X, TargetPivot.Y, TargetPivot.Z,
 			CamNow.X, CamNow.Y, CamNow.Z,
 			SmoothedArmLengthCm, SafeArmCm, *ArmHitName, LiftScale, AimPitchDeg);
 	}
+	// —— 收尾复核(2026-09-15 两轮用户反馈:①"偶尔还有穿模" ②"按住右键依然穿模")——
+	// 分两段各钳各的:
+	//   ① 臂长:沿**最终朝向**从**最终枢轴位置**扫(上一帧俯仰/枢轴与最终位差一个夹角+位移,
+	//      就是残留穿模的几帧);两个通道都扫(有些网格只挡 Visibility)。
+	//   ② **越肩偏移单独钳**:瞄准态的 SocketOffset 是**横向**位移,把臂压到最短也收不掉它
+	//      (相机一直贴在侧向 65cm 的墙里)——瞄准穿模就是这一条。按探针结果缩偏移量。
+	{
+		const FQuat FinalRotation = BuildCameraRotation(TargetCameraUp, AimPitchDeg);
+		const FVector FinalArmDir = -FinalRotation.GetForwardVector();
+		FCollisionQueryParams FinalParams(SCENE_QUERY_STAT(GSCamFinalVerify), false, this);
+
+		// ① 臂长复核
+		if (GetWorld())
+		{
+			// 只扫 ECC_Camera:关卡里击杀体/触发体这类"只挡 Visibility 不挡 Camera"的游戏体
+			// 如果也算进来,球一进区域臂长就被误收到最短(2026-09-15 "相机转不动"的另一半原因)。
+			float VerifyArmCm = SmoothedArmLengthCm;
+			const FVector ArmEnd = Location + FinalArmDir * (SmoothedArmLengthCm + CameraProbeMarginCm);
+			{
+				FHitResult VerifyHit;
+				if (GetWorld()->SweepSingleByChannel(VerifyHit, Location, ArmEnd, FQuat::Identity, ECC_Camera,
+					FCollisionShape::MakeSphere(CameraProbeRadiusCm), FinalParams))
+				{
+					VerifyArmCm = FMath::Max((VerifyHit.Location - Location).Size() - CameraProbeMarginCm, 40.0f);
+				}
+			}
+			if (VerifyArmCm < SmoothedArmLengthCm)
+			{
+				SmoothedArmLengthCm = VerifyArmCm;
+				CameraArm->TargetArmLength = SmoothedArmLengthCm;
+				ProbeClearSeconds = 0.0f;
+			}
+		}
+
+		// ② 越肩偏移复核:从"轴上的相机位"沿偏移方向扫;命中就把偏移缩到命中点以内。
+		//    写回组件即生效:UpdateAiming 在本帧更早处写过偏移,相机块最后这个写覆盖它
+		//    (与臂长同一套"谁最后写谁生效"的约定)。
+		if (CameraArm && GetWorld())
+		{
+			const FVector SocketWorld = FinalRotation.RotateVector(CameraArm->SocketOffset);
+			const float OffsetLenCm = SocketWorld.Size();
+			if (OffsetLenCm > 0.5f)
+			{
+				const FVector AxisCamPos = Location + FinalArmDir * SmoothedArmLengthCm;
+				const FVector OffsetDir = SocketWorld / OffsetLenCm;
+				const FVector OffsetEnd = AxisCamPos + OffsetDir * (OffsetLenCm + CameraProbeMarginCm);
+				float SafeOffsetCm = OffsetLenCm;
+				{
+					FHitResult VerifyHit;
+					if (GetWorld()->SweepSingleByChannel(VerifyHit, AxisCamPos, OffsetEnd, FQuat::Identity, ECC_Camera,
+						FCollisionShape::MakeSphere(CameraProbeRadiusCm), FinalParams))
+					{
+						SafeOffsetCm = FMath::Max((VerifyHit.Location - AxisCamPos).Size() - CameraProbeMarginCm, 0.0f);
+					}
+				}
+				if (SafeOffsetCm < OffsetLenCm)
+				{
+					CameraArm->SocketOffset = CameraArm->SocketOffset * (SafeOffsetCm / OffsetLenCm);
+					ProbeClearSeconds = 0.0f;
+				}
+			}
+		}
+	}
+
 	CameraPivot->SetWorldLocationAndRotation(
 		Location, BuildCameraRotation(TargetCameraUp, AimPitchDeg));
 	// 供下一帧探针沿"相机真实朝向"打(1 帧滞后,避免与 LiftScale→AimPitchDeg 循环依赖)。
 	LastAimPitchDeg = AimPitchDeg;
 	CurrentCameraUp = CurrentCameraRotation.RotateVector(FVector::UpVector);
+}
+
+void AGSRollingBallPawn::SetBallMeshFaded(bool bFaded)
+{
+	if (!BallMesh)
+	{
+		return;
+	}
+
+	// 没配半透明材质:退回原来的"整球隐藏",功能不失效。
+	if (!BallMeshFadeMaterial)
+	{
+		BallMesh->SetVisibility(!bFaded);
+		return;
+	}
+
+	if (bFaded)
+	{
+		if (!BallMeshFadeMID)
+		{
+			BallMeshFadeMID = UMaterialInstanceDynamic::Create(BallMeshFadeMaterial, this);
+		}
+		if (!BallMeshFadeMID)
+		{
+			BallMesh->SetVisibility(false);
+			return;
+		}
+		if (!BallMeshOriginalMaterial)
+		{
+			BallMeshOriginalMaterial = BallMesh->GetMaterial(0);
+		}
+		BallMeshFadeMID->SetScalarParameterValue(TEXT("Opacity"), BallMeshFadeOpacity);
+		BallMesh->SetVisibility(true);
+		BallMesh->SetMaterial(0, BallMeshFadeMID);
+	}
+	else if (BallMeshOriginalMaterial)
+	{
+		BallMesh->SetMaterial(0, BallMeshOriginalMaterial);
+		BallMesh->SetVisibility(true);
+	}
+}
+
+bool AGSRollingBallPawn::MatchesStairTag(const AActor* Actor, const FString& TagsCsv) const
+{
+	if (!Actor || TagsCsv.IsEmpty())
+	{
+		return false;
+	}
+	// 局部名别叫 Tags:AActor 自己有成员 Tags(C4458 阴影告警会被当成错误)。
+	TArray<FString> TagList;
+	TagsCsv.ParseIntoArray(TagList, TEXT(","), true);
+	const FString Label = Actor->GetActorNameOrLabel();
+	const FString ClassName = Actor->GetClass()->GetName();
+	for (FString& Tag : TagList)
+	{
+		Tag.TrimStartAndEndInline();
+		if (!Tag.IsEmpty() && (Label.Contains(Tag) || ClassName.Contains(Tag)))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
@@ -701,29 +1198,193 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 		return;
 	}
 
-	// 楼梯吸力(2026-09-13 用户需求):踩在楼梯上时给一个朝支撑面的加速度,爬楼时把球
-	// "摁"在台阶上、不被台阶棱角弹飞。**只对楼梯生效**——沿重力向下打探针,命中 actor
-	// 的名字/类名含 StairStickNameTag(默认 "Stairs")才施力;空中(刚被台阶弹起)时探针
-	// 仍能探到下方台阶,正是"飞出去"的瞬间被拉回来。其它任何表面一律不受影响。
-	// 有输入/无输入都生效(松手停在台阶上时同样贴着)。转向器滑行期在上面已 return。
+	if (bFaceCaptureActive)
+	{
+		// 特殊滑梯吸附期间同理:速度由 UpdateFaceCapture 逐帧锁在"沿面切向 + 朝面合拢",
+		// 这里必须让路,否则刹车/输入会把球从面上拽下来。
+		return;
+	}
+	// 楼梯吸力(2026-09-13 用户需求;2026-09-15 用户要求"只改点名的那一段楼梯"后重构):
+	//   基础:踩在楼梯上给一个朝支撑面的加速度,把球"摁"在台阶上、不被棱角弹飞。只对命中
+	//         StairStickNameTag(默认 "Stairs")的件生效,其它任何表面零影响。
+	//   强化:命中 StairStickBoostNameTag(默认 Linear3~6 = 用户点名的那段长楼梯)时,吸力与
+	//         影响区都用 Boost* 的更大值,并额外吃两道**削速度**硬约束防飞(光给力治不住
+	//         "被台阶棱角顶飞":力要等速度抵消,球早飞了)。
+	//   ⚠ 削速度**只在下坡趋势时**生效。爬台阶必须靠向上的速度,削了就直接爬不动
+	//     (用户实测"其他楼梯都上坡上不了了");趋势(垂直速度指数均值)能区分"爬坡 vs 被顶飞",
+	//     瞬时速度方向区分不了。
 	if (bStairStickEnabled && BallCollision->IsSimulatingPhysics())
 	{
 		const FVector StickDown = GetActiveGravityDirection().GetSafeNormal();
 		if (!StickDown.IsNearlyZero())
 		{
 			const FVector StickFrom = BallCollision->GetComponentLocation();
-			const float StickReach = BallCollision->GetScaledSphereRadius() + StairStickProbeReachCm;
+			const float BallR = BallCollision->GetScaledSphereRadius();
+			// 垂直速度指数均值 → "现在是不是在下坡"。上坡(上升趋势)时 DescendGate=0,永不削速度。
+			const float TrendAlpha = FMath::Clamp(DeltaSeconds * 6.0f, 0.0f, 1.0f);
+			StairVzTrendCm = FMath::Lerp(StairVzTrendCm,
+				BallCollision->GetPhysicsLinearVelocity().Z, TrendAlpha);
+			const float DescendGate = FMath::Clamp(-StairVzTrendCm / 200.0f, 0.0f, 1.0f);
+
 			FHitResult StickHit;
 			FCollisionQueryParams StickParams(SCENE_QUERY_STAT(GSStairStick), false, this);
-			if (GetWorld()->LineTraceSingleByChannel(StickHit, StickFrom, StickFrom + StickDown * StickReach,
-				ECC_Visibility, StickParams))
+			bool bOnStairs = false;
+			bool bBoosted = false;
+			if (GetWorld())
 			{
-				const AActor* StickActor = StickHit.GetActor();
-				if (StickActor && !StairStickNameTag.IsEmpty()
-					&& (StickActor->GetActorNameOrLabel().Contains(StairStickNameTag)
-						|| StickActor->GetClass()->GetName().Contains(StairStickNameTag)))
+				// ① 基础探针:基础影响区内命中"任何楼梯件"即算在楼梯上。
+				if (GetWorld()->LineTraceSingleByChannel(StickHit, StickFrom,
+					StickFrom + StickDown * (BallR + StairStickProbeReachCm), ECC_Visibility, StickParams))
 				{
-					BallCollision->AddForce(StickDown * StairStickAccelCm, NAME_None, true);
+					bOnStairs = MatchesStairTag(StickHit.GetActor(), StairStickNameTag);
+				}
+				// ② 强化探针(更长):基础探针没认到时才用,专门给点名楼梯更大影响区。
+				if (!bOnStairs)
+				{
+					FHitResult BoostHit;
+					if (GetWorld()->LineTraceSingleByChannel(BoostHit, StickFrom,
+						StickFrom + StickDown * (BallR + StairStickBoostProbeReachCm), ECC_Visibility, StickParams))
+					{
+						if (MatchesStairTag(BoostHit.GetActor(), StairStickBoostNameTag))
+						{
+							bOnStairs = true;
+							bBoosted = true;
+							StickHit = BoostHit;
+						}
+					}
+				}
+				if (bOnStairs && !bBoosted)
+				{
+					bBoosted = MatchesStairTag(StickHit.GetActor(), StairStickBoostNameTag);
+				}
+			}
+
+			if (bOnStairs)
+			{
+				// 记下"确实踩在楼梯上"的位置与时刻:离开后的一小块靠它继续吸。
+				LastStairContactLocation = StickFrom;
+				LastStairContactTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+				bHasStairContact = true;
+				bLastStairBoosted = bBoosted;
+				if (bStairDebugLog)
+				{
+					const FVector DbgV = BallCollision->GetPhysicsLinearVelocity();
+					UE_LOG(LogTemp, Log, TEXT("[GSStair] t=%.3f on=1 boost=%d pos=(%.0f,%.0f,%.0f) v=(%.0f,%.0f,%.0f) sup=%d trend=%.0f gate=%.2f n=(%.2f,%.2f,%.2f)"),
+						GetWorld()->GetTimeSeconds(), bBoosted ? 1 : 0, StickFrom.X, StickFrom.Y, StickFrom.Z,
+						DbgV.X, DbgV.Y, DbgV.Z,
+						(LandingResponse && LandingResponse->IsSupported()) ? 1 : 0,
+						StairVzTrendCm, DescendGate,
+						StickHit.ImpactNormal.X, StickHit.ImpactNormal.Y, StickHit.ImpactNormal.Z);
+				}
+
+				// 空中(刚被台阶棱角弹起 / 冲出末端)与"骑在台阶上"分开给力:
+				//   空中 —— 没有接触摩擦,朝支撑面拉一把只赚不亏,用更大的固定强度;
+				//   接触 —— 分坡:上坡弱(不拖爬坡)、下坡全强度(抓地不弹)。
+				const bool bAirborne = LandingResponse && !LandingResponse->IsSupported();
+				if (bAirborne)
+				{
+					const float AirborneAccel = bBoosted
+						? StairStickBoostAirborneAccelCm : StairStickAirborneAccelCm;
+					BallCollision->AddForce(StickDown * AirborneAccel, NAME_None, true);
+					// ② 上抛分量当场归零(仅点名楼梯 + 下坡趋势)。
+					const float LiftKill = bBoosted ? (StairStickBoostLiftKill * DescendGate) : 0.0f;
+					if (LiftKill > 0.0f)
+					{
+						const FVector V = BallCollision->GetPhysicsLinearVelocity();
+						const FVector LiftDir = -StickDown;
+						const float LiftSpeed = FVector::DotProduct(V, LiftDir);
+						if (LiftSpeed > 0.0f)
+						{
+							BallCollision->SetPhysicsLinearVelocity(V - LiftDir * (LiftSpeed * LiftKill));
+						}
+					}
+				}
+				else
+				{
+					const FVector V0 = BallCollision->GetPhysicsLinearVelocity();
+					float StickScale = 1.0f;
+					const float StickSpeed = V0.Size();
+					if (StickSpeed > 1.0f)
+					{
+						const float DownhillDot = FVector::DotProduct(V0 / StickSpeed, StickDown);
+						StickScale = FMath::Lerp(StairStickUphillScale, 1.0f,
+							FMath::Clamp(DownhillDot, 0.0f, 1.0f));
+					}
+					const float ContactAccel = bBoosted ? StairStickBoostAccelCm : StairStickAccelCm;
+					BallCollision->AddForce(StickDown * ContactAccel * StickScale, NAME_None, true);
+					// ③ 下坡限速(仅点名楼梯 + 下坡趋势):见头文件说明——台阶不连续,不限速必跳步。
+					if (bBoosted && DescendGate > 0.0f && StairStickBoostMaxSpeedCm > 0.0f)
+					{
+						const FVector V = BallCollision->GetPhysicsLinearVelocity();
+						const FVector Vertical = StickDown * FVector::DotProduct(V, StickDown);
+						FVector Planar = V - Vertical;
+						const float PlanarSpeed = Planar.Size();
+						if (PlanarSpeed > StairStickBoostMaxSpeedCm)
+						{
+							Planar *= StairStickBoostMaxSpeedCm / PlanarSpeed;
+							BallCollision->SetPhysicsLinearVelocity(Vertical + Planar);
+						}
+					}
+
+					// ① 离面法向分量削掉(仅点名楼梯 + 下坡趋势)。
+					const float NormalKill = bBoosted ? (StairStickBoostNormalKill * DescendGate) : 0.0f;
+					if (NormalKill > 0.0f)
+					{
+						const FVector SurfaceNormal = StickHit.ImpactNormal.GetSafeNormal();
+						const FVector V = BallCollision->GetPhysicsLinearVelocity();
+						const float NormalSpeed = FVector::DotProduct(V, SurfaceNormal);
+						if (NormalSpeed > 0.0f)
+						{
+							BallCollision->SetPhysicsLinearVelocity(
+								V - SurfaceNormal * (NormalSpeed * NormalKill));
+						}
+					}
+				}
+			}
+			else if (bHasStairContact)
+			{
+				// 端点延续吸附(2026-09-15 用户需求):上下端点往外一小块仍给吸附,防止从最后
+				// 一级台阶飞出去。强度/范围按"上次踩的是不是点名楼梯"取强化值或基础值。
+				const float NowSec = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+				const float EndMargin = bLastStairBoosted
+					? StairStickBoostEndMarginCm : StairStickEndMarginCm;
+				const float EndSeconds = bLastStairBoosted
+					? StairStickBoostEndSeconds : StairStickEndSeconds;
+				const float EndAccel = bLastStairBoosted
+					? StairStickBoostEndAccelCm : StairStickEndAccelCm;
+				const bool bNearStairEnd =
+					FVector::Dist(StickFrom, LastStairContactLocation) <= EndMargin
+					&& (NowSec - LastStairContactTime) <= EndSeconds;
+				if (bNearStairEnd)
+				{
+					BallCollision->AddForce(StickDown * EndAccel, NAME_None, true);
+					// 点名楼梯的端点外同样削上抛分量(仅下坡趋势)。
+					const float LiftKill = bLastStairBoosted
+						? (StairStickBoostLiftKill * DescendGate) : 0.0f;
+					if (LiftKill > 0.0f)
+					{
+						const FVector V = BallCollision->GetPhysicsLinearVelocity();
+						const FVector LiftDir = -StickDown;
+						const float LiftSpeed = FVector::DotProduct(V, LiftDir);
+						if (LiftSpeed > 0.0f)
+						{
+							BallCollision->SetPhysicsLinearVelocity(V - LiftDir * (LiftSpeed * LiftKill));
+						}
+					}
+					if (bStairDebugLog)
+					{
+						const FVector DbgV = BallCollision->GetPhysicsLinearVelocity();
+						UE_LOG(LogTemp, Log, TEXT("[GSStair] t=%.3f on=0 boost=%d pos=(%.0f,%.0f,%.0f) v=(%.0f,%.0f,%.0f) dToLast=%.0f dt=%.2f gate=%.2f"),
+							NowSec, bLastStairBoosted ? 1 : 0, StickFrom.X, StickFrom.Y, StickFrom.Z,
+							DbgV.X, DbgV.Y, DbgV.Z,
+							FVector::Dist(StickFrom, LastStairContactLocation),
+							NowSec - LastStairContactTime, DescendGate);
+					}
+				}
+				else
+				{
+					// 走远/超时 → 记忆失效:楼梯吸力绝不会漏到别的表面上。
+					bHasStairContact = false;
 				}
 			}
 		}
@@ -848,6 +1509,11 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 		Right = FVector::CrossProduct(Up, Forward);
 	}
 	FVector Desired = Forward * MoveInput.Y + Right * MoveInput.X;
+	// Debug:世界方向强制驱动(验证场景机制用;零向量 = 不介入,见头文件说明)。
+	if (!DebugAutoDriveWorldDir.IsNearlyZero())
+	{
+		Desired = DebugAutoDriveWorldDir;
+	}
 	if (!Desired.Normalize())
 	{
 		return;
@@ -898,6 +1564,21 @@ void AGSRollingBallPawn::PollNativeInput()
 	float MouseX = 0.0f;
 	float MouseY = 0.0f;
 	PC->GetInputMouseDelta(MouseX, MouseY);
+	// 鼠标视角诊断(2026-09-15 用户"想转向但死活不转"):把这条链路上的每个条件都打出来——
+	// delta 本身 / 原生轮询开关 / 灵敏度倍率 / 输入模式。任何一项不对都能一眼定位。
+	if (bFallbackCamDebugLog && GetWorld())
+	{
+		static double GSCamMouseLogNextTime = 0.0;
+		const double NowT = GetWorld()->GetTimeSeconds();
+		if (NowT >= GSCamMouseLogNextTime)
+		{
+			GSCamMouseLogNextTime = NowT + 0.4;
+			UE_LOG(LogTemp, Log, TEXT("[GSCamMouse] t=%.2f mouse=(%.2f,%.2f) polling=%d sensMult=%.2f yawScale=%.3f pitchScale=%.3f sensScale=%.2f"),
+				NowT, MouseX, MouseY, bEnableNativePollingInput ? 1 : 0, MouseSensitivityMultiplier,
+				CameraYawDegreesPerMouseUnit, CameraPitchDegreesPerMouseUnit,
+				(Camera && DefaultCameraFOV > 1.0f) ? FMath::Sqrt(Camera->FieldOfView / DefaultCameraFOV) : -1.0f);
+		}
+	}
 	// Rail mode owns the camera; accumulated mouse offsets only apply to the
 	// chase rig, otherwise they would suddenly apply on the next rail handoff.
 		if (!RailCamera || !RailCamera->IsDriving())
@@ -999,6 +1680,8 @@ void AGSRollingBallPawn::Tick(float DeltaSeconds)
 
 	// 转向器过渡先于移动/相机推进:三者读到同一个平滑重力方向。
 	UpdateGravityRedirect(DeltaSeconds);
+	// 特殊滑梯吸附同理:先推进吸附(它自己驱动速度),再走移动/相机。
+	UpdateFaceCapture(DeltaSeconds);
 
 	if (bInputLocked)
 	{
@@ -1074,11 +1757,20 @@ void AGSRollingBallPawn::SetMoveInput(FVector2D NewMoveInput)
 
 void AGSRollingBallPawn::AddCameraLookInput(float YawDeltaDegrees, float PitchDeltaDegrees)
 {
-	// 航向绕"当前重力上轴"旋转:上轴 ±Z 互换时同一鼠标动作给出的屏幕转向天然一致
+	// 航向绕"支撑上轴(不含俯仰)"旋转:上轴 ±Z 互换时同一鼠标动作给出的屏幕转向天然一致
 	//(绕 -Z 转 +θ 等价于绕 +Z 转 -θ,恰好抵消旧实现的镜像)。
+	// ⚠ 2026-09-15 关键修正:原来用 CurrentCameraUp,而 CurrentCameraUp 来自
+	// `BuildCameraRotation(TargetCameraUp)` —— 该函数内部**总是**把 CameraPitchDegrees 计进总俯仰,
+	// 所以 CurrentCameraUp 是**带俯仰的倾斜上轴**;绕倾斜轴转航向时水平方位只变化 cos(俯仰) 倍
+	// (实测俯仰 70° → 每次 +90° 输入只转 21°,用户:"往右拽没用、只能往左")。必须用不含俯仰的
+	// TargetCameraUp(=支撑面上方 / 未翻转时世界 up)。
 	if (!CameraAimHeading.IsNearlyZero() && YawDeltaDegrees != 0.0f)
 	{
-		const FVector Axis = CurrentCameraUp.GetSafeNormal();
+		FVector Axis = TargetCameraUp.GetSafeNormal();
+		if (Axis.IsNearlyZero())
+		{
+			Axis = CurrentCameraUp.GetSafeNormal();
+		}
 		if (!Axis.IsNearlyZero())
 		{
 			CameraAimHeading = FQuat(Axis, FMath::DegreesToRadians(YawDeltaDegrees))
@@ -1096,7 +1788,7 @@ void AGSRollingBallPawn::UpdateAiming()
 		return;
 	}
 
-	const bool bAimDown = PC->IsInputKeyDown(AimKey);
+	const bool bAimDown = PC->IsInputKeyDown(AimKey) || bForceAimingDebug;
 	if (bAimDown != bAiming)
 	{
 		bAiming = bAimDown;

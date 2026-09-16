@@ -86,6 +86,157 @@ bool UGSRedirectorComponent::IsBallTouchingChute(const USphereComponent& BallSph
 	return bHitChute;
 }
 
+// 特殊滑梯:面吸附触发(2026-09-15 用户需求)。
+// 判定链:两面垂直 → 球当前重力落在某一面 → 该面允许吸附进入 → 球心朝该面法线反向探到
+// **本滑梯** → 接触法线确实是这一面的 → (可选)球在沿面前进 → 速度达下限 → 交给 Pawn。
+// 关键区别:旧逻辑的 gate[side] 把"撞在竖直面上"整类拒掉,而面吸附要接的正是这一类。
+bool UGSRedirectorComponent::TryBeginFaceCapture(AGSRollingBallPawn& Ball, const USphereComponent& BallSphere,
+	const FVector& BallLoc, const FVector& Velocity, float Speed)
+{
+	if (Ball.IsFaceCapturing() || Ball.IsFaceCaptureCoolingDown())
+	{
+		// 正在吸附中 / 刚刚释放(见 Pawn 的 FaceCaptureReleaseCooldownSeconds):
+		// 后者是双向的必需品——A→B 刚把球送上墙的那一帧,球还贴着墙、重力已是墙的重力,
+		// 本滑梯是三个件叠着摆的,另外两个件的触发盒同样罩着这颗球,不设冷却就会被它们
+		// 立刻反向吸回高台(来回弹)。冷却期内球已沿墙走开,探针打不到圆弧了。
+		return false;
+	}
+	// 调试:本组件开了 bDebugLog 时,把"为什么没吸附上"逐条写清楚(排查"球滚过去没反应"用)。
+	auto RejectLog = [&](const FString& Why)
+	{
+		if (bDebugLog)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s face-capture rejected: %s"),
+				*GetNameSafe(GetOwner()), *Why);
+		}
+	};
+
+	if (Speed < MinTriggerSpeedCm)
+	{
+		RejectLog(FString::Printf(TEXT("too-slow speed=%.0f < %.0f"), Speed, MinTriggerSpeedCm));
+		return false;
+	}
+
+	const FVector DirA = GSGravity::DirectionToVector(GravityDirectionA).GetSafeNormal();
+	const FVector DirB = GSGravity::DirectionToVector(GravityDirectionB).GetSafeNormal();
+	if (FMath::Abs(FVector::DotProduct(DirA, DirB)) > 0.1f)
+	{
+		return false;
+	}
+
+	// 球当前重力落在哪一面:入口面就是它"骑着的"那一面。
+	const FVector BallGravity = Ball.GetActiveGravityDirection().GetSafeNormal();
+	const float DotA = FVector::DotProduct(BallGravity, DirA);
+	const float DotB = FVector::DotProduct(BallGravity, DirB);
+	const bool bEnterFromA = DotA >= DotB;
+	const TCHAR* const Side = bEnterFromA ? TEXT("A/high-platform") : TEXT("B/wall");
+	if (FVector::DotProduct(BallGravity, bEnterFromA ? DirA : DirB) < EntryFaceGravityMin)
+	{
+		return false;
+	}
+	if (!(bEnterFromA ? bCaptureEntryFromA : bCaptureEntryFromB))
+	{
+		return false;
+	}
+
+	// 支撑门:空中擦过面的球不吸附(那一刻不算"骑在面上")。
+	// A 面(高台)那侧放宽:跑快的球会"跳",保持 0.2s 会让高速球的采样帧全落在"刚离地",
+	// 一次也抓不到(2026-09-16 用户要求"上面判定敏感一些")。
+	if (bRequireSupportToTrigger && Ball.LandingResponse)
+	{
+		const float MaxAirborneSeconds = bEnterFromA
+			? FaceCaptureGroundMaxAirborneSeconds : MaxAirborneSecondsForTrigger;
+		const float AirborneSeconds = Ball.LandingResponse->GetAirborneSeconds();
+		if (!Ball.LandingResponse->IsSupported() || AirborneSeconds > MaxAirborneSeconds)
+		{
+			RejectLog(FString::Printf(TEXT("%s not-supported airborne=%.2fs > %.2fs"),
+				Side, AirborneSeconds, MaxAirborneSeconds));
+			return false;
+		}
+	}
+
+	// 出口面 = 另一面。入口 B(竖直面)时出口 A(平面)= 竖直向下:就是"转成重力向下"。
+	const FVector EntryGravity = bEnterFromA ? DirA : DirB;
+	const FVector ExitGravity = bEnterFromA ? DirB : DirA;
+	const FVector EntryFaceNormal = -EntryGravity;
+	const FVector ExitFaceNormal = -ExitGravity;
+
+	// 朝入口面法线的反向探一下,取回真实接触法线(必须命中的是本滑梯)。
+	const float Radius = BallSphere.GetScaledSphereRadius();
+	const float Reach = FMath::Max(Radius + ContactTouchMarginCm, 1.0f);
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(GSFaceCaptureEntry), false, BallSphere.GetOwner());
+	Params.AddIgnoredComponent(&BallSphere);
+	if (!GetWorld() || !GetWorld()->LineTraceSingleByChannel(Hit, BallLoc, BallLoc - EntryFaceNormal * Reach,
+		ECC_WorldStatic, Params))
+	{
+		RejectLog(FString::Printf(TEXT("%s probe-miss(没探到面,可能悬空)"), Side));
+		return false;
+	}
+	if (Hit.GetActor() != GetOwner())
+	{
+		// 探到的是别的物体(高台本体网格 / 别的件)。本滑梯的"该进哪里"只认自己的圆弧。
+		RejectLog(FString::Printf(TEXT("%s probe-hit-other-actor=%s"), Side, *Hit.GetActor()->GetName()));
+		return false;
+	}
+
+	const FVector ContactNormal = Hit.Normal.GetSafeNormal();
+	// A 面(高台)用更松的接触法线门:高速球可能已经压在圆弧上了(见头文件说明)。
+	const float EntryNormalMin = bEnterFromA
+		? FaceCaptureGroundEntryNormalMin : FaceCaptureEntryNormalMin;
+	if (FVector::DotProduct(ContactNormal, EntryFaceNormal) < EntryNormalMin)
+	{
+		// 贴的不是这一面(例如从平面那侧擦过) → 交给原弯道逻辑。
+		RejectLog(FString::Printf(TEXT("%s normal-mismatch dot=%.2f < %.2f"),
+			Side, FVector::DotProduct(ContactNormal, EntryFaceNormal), EntryNormalMin));
+		return false;
+	}
+
+	// 沿面前进方向 = 旋转轴 × 接触法线(入口竖直面时朝上,出口平面时朝外)。
+	// 这个方向必然是"把接触法线往出口面转"的那一侧(轴就是这么构造的),不存在方向二义性;
+	// 反着滚的球由下面的方向门拒掉。
+	const FVector Axis = FVector::CrossProduct(EntryFaceNormal, ExitFaceNormal).GetSafeNormal();
+	const FVector ApproachDir = FVector::CrossProduct(Axis, ContactNormal).GetSafeNormal();
+	if (ApproachDir.IsNearlyZero())
+	{
+		return false;
+	}
+
+	// 吸附方式由**入口面**决定(用户 2026-09-16 "看人下菜"的落点):
+	//   · 入口 = B(竖直面):球是"掉下去弹起来擦到墙上"或"已经骑在墙上往上滚"——上一轮
+	//     已验收的路径,保持原硬吸附(定速沿面驱动),手感不动。
+	//   · 入口 = A(平面/高台):球是自己在地面上滚到圆弧的,走温和吸附——保留球自己的
+	//     切向速度,只切掉"离开面"的法向分量,靠重力随路程旋转把它贴到墙上。
+	const bool bGroundedEntry = bEnterFromA;
+	const float MinApproachSpeedCm = bGroundedEntry
+		? FaceCaptureGroundMinApproachSpeedCm
+		: FaceCaptureMinApproachSpeedCm;
+	const float ApproachSpeedCm = FVector::DotProduct(Velocity, ApproachDir);
+	if (MinApproachSpeedCm > 0.0f && ApproachSpeedCm < MinApproachSpeedCm)
+	{
+		RejectLog(FString::Printf(TEXT("%s approach=%.0f < %.0f (球不是朝圆弧滚)"),
+			Side, ApproachSpeedCm, MinApproachSpeedCm));
+		return false;
+	}
+
+	Ball.BeginFaceCapture(GetOwner(), ContactNormal, ExitGravity, FaceCaptureSpeedCm,
+		FaceCaptureStickAccelCm, FaceCaptureExitNormalDot,
+		bGroundedEntry, FaceCaptureGroundMinSpeedCm, FaceCaptureGroundMaxSpeedCm);
+
+	if (bDebugLog)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s face-capture: style=%s ball=(%.0f,%.0f,%.0f) n=(%.2f,%.2f,%.2f) %s→%s v=(%.0f,%.0f,%.0f) speed=%.0f approach=%.0f"),
+			*GetNameSafe(GetOwner()), bGroundedEntry ? TEXT("grounded") : TEXT("hard"),
+			BallLoc.X, BallLoc.Y, BallLoc.Z,
+			ContactNormal.X, ContactNormal.Y, ContactNormal.Z,
+			*GSGravity::GetDirectionDisplayName(bEnterFromA ? GravityDirectionA : GravityDirectionB),
+			*GSGravity::GetDirectionDisplayName(bEnterFromA ? GravityDirectionB : GravityDirectionA),
+			Velocity.X, Velocity.Y, Velocity.Z, Speed, ApproachSpeedCm);
+	}
+	LastFireTime = GetWorld()->GetTimeSeconds();
+	return true;
+}
+
 void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
@@ -164,6 +315,23 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	const FVector Velocity = Ball->GetBallLinearVelocity();
 	const float Speed = Velocity.Size();
 
+	// ---- 特殊滑梯:面吸附(只对勾了 bFaceCaptureMode 的滑梯生效)----
+	// 放在弯道判定之前:球"从侧面碰到竖直面"这一下,旧逻辑会走 gate[side] 直接拒掉,
+	// 面吸附模式要接住的正是这一下。命中后由 Pawn 逐帧驱动到另一面并提交重力。
+	if (bFaceCaptureMode)
+	{
+		if (TryBeginFaceCapture(*Ball, *BallSphere, BallLoc, Velocity, Speed))
+		{
+			return;
+		}
+		if (!bFaceCaptureAlsoClassic)
+		{
+			// 没吸附上(例如从平面那侧滚过)就什么都不做:否则吸附刚把球送到另一面上,
+			// 旧弯道逻辑会在同一帧又把它甩回去。
+			return;
+		}
+	}
+
 	// 调试:球在触发盒内时,把各门限的实测值逐帧打出来(定位"为什么不触发")。
 	const bool bGateDebug = bDebugLog;
 	auto GateLog = [&](const TCHAR* Stage, const FVector& ExitDirForLog, float Align, bool bTouch)
@@ -239,14 +407,15 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 
 	// **只有碰到"正面接地那一块"才触发**(用户要求):球心到入口侧面(地面/墙/天花板
 	// 那一侧的面)的距离 ≤ 球半径 + EntryLipBandCm 才算碰在圆弧接地处;碰在滑梯顶面/
-	// 背面等其它位置不触发。入口侧面 = 网格包围盒朝入口面那一侧的支撑面
-	// (入口重力朝哪边,就取那一侧的面)。
-	const FVector Extent = MeshBounds.GetExtent();
-	const FVector LipAnchor = MeshBounds.GetCenter() + FVector(
-		FMath::Abs(EntryGravity.X) > 0.5f ? FMath::Sign(EntryGravity.X) * Extent.X : 0.0f,
-		FMath::Abs(EntryGravity.Y) > 0.5f ? FMath::Sign(EntryGravity.Y) * Extent.Y : 0.0f,
-		FMath::Abs(EntryGravity.Z) > 0.5f ? FMath::Sign(EntryGravity.Z) * Extent.Z : 0.0f);
-	const float DistToLipCm = FMath::Abs(FVector::DotProduct(BallLoc - LipAnchor, EntryGravity));
+	// 背面等其它位置不触发。入口侧面 = 网格包围盒沿入口重力轴**离球最近的那一侧**面。
+	// 2026-09-15:原先硬取"入口重力指向的那一侧"(Center + Sign(N)*Extent),只对
+	// "滑梯坐在球的支撑面上"那种摆法成立(球贴包围盒底面,如 LDI_Gravityshift);
+	// 弯道往反方向卷时(如平台外圆角 Blockout_Corner_Curved:球骑在包围盒**顶面**,
+	// 弧往下卷)会取到对面那侧 → 实测 DistToLip=276 ≫ R+60=110,正常触发全被
+	// gate[lip] 拒掉。改成按球实际在哪一侧选面,两种摆法都对,原摆法结果不变。
+	const float SignedCm = FVector::DotProduct(BallLoc - MeshBounds.GetCenter(), EntryGravity);
+	const float ExtentAlongGravityCm = FMath::Abs(FVector::DotProduct(MeshBounds.GetExtent(), EntryGravity));
+	const float DistToLipCm = FMath::Abs(FMath::Abs(SignedCm) - ExtentAlongGravityCm);
 	const float Radius = BallSphere->GetScaledSphereRadius();
 	if (DistToLipCm > Radius + EntryLipBandCm)
 	{
