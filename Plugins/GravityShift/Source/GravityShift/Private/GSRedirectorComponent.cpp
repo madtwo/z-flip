@@ -101,17 +101,19 @@ bool UGSRedirectorComponent::TryBeginFaceCapture(AGSRollingBallPawn& Ball, const
 		// 立刻反向吸回高台(来回弹)。冷却期内球已沿墙走开,探针打不到圆弧了。
 		return false;
 	}
-	// 支撑门(复用同一批开关):空中擦过竖直面的球不吸附。
-	if (bRequireSupportToTrigger && Ball.LandingResponse)
+	// 调试:本组件开了 bDebugLog 时,把"为什么没吸附上"逐条写清楚(排查"球滚过去没反应"用)。
+	auto RejectLog = [&](const FString& Why)
 	{
-		if (!Ball.LandingResponse->IsSupported()
-			|| Ball.LandingResponse->GetAirborneSeconds() > MaxAirborneSecondsForTrigger)
+		if (bDebugLog)
 		{
-			return false;
+			UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s face-capture rejected: %s"),
+				*GetNameSafe(GetOwner()), *Why);
 		}
-	}
+	};
+
 	if (Speed < MinTriggerSpeedCm)
 	{
+		RejectLog(FString::Printf(TEXT("too-slow speed=%.0f < %.0f"), Speed, MinTriggerSpeedCm));
 		return false;
 	}
 
@@ -127,6 +129,7 @@ bool UGSRedirectorComponent::TryBeginFaceCapture(AGSRollingBallPawn& Ball, const
 	const float DotA = FVector::DotProduct(BallGravity, DirA);
 	const float DotB = FVector::DotProduct(BallGravity, DirB);
 	const bool bEnterFromA = DotA >= DotB;
+	const TCHAR* const Side = bEnterFromA ? TEXT("A/high-platform") : TEXT("B/wall");
 	if (FVector::DotProduct(BallGravity, bEnterFromA ? DirA : DirB) < EntryFaceGravityMin)
 	{
 		return false;
@@ -134,6 +137,22 @@ bool UGSRedirectorComponent::TryBeginFaceCapture(AGSRollingBallPawn& Ball, const
 	if (!(bEnterFromA ? bCaptureEntryFromA : bCaptureEntryFromB))
 	{
 		return false;
+	}
+
+	// 支撑门:空中擦过面的球不吸附(那一刻不算"骑在面上")。
+	// A 面(高台)那侧放宽:跑快的球会"跳",保持 0.2s 会让高速球的采样帧全落在"刚离地",
+	// 一次也抓不到(2026-09-16 用户要求"上面判定敏感一些")。
+	if (bRequireSupportToTrigger && Ball.LandingResponse)
+	{
+		const float MaxAirborneSeconds = bEnterFromA
+			? FaceCaptureGroundMaxAirborneSeconds : MaxAirborneSecondsForTrigger;
+		const float AirborneSeconds = Ball.LandingResponse->GetAirborneSeconds();
+		if (!Ball.LandingResponse->IsSupported() || AirborneSeconds > MaxAirborneSeconds)
+		{
+			RejectLog(FString::Printf(TEXT("%s not-supported airborne=%.2fs > %.2fs"),
+				Side, AirborneSeconds, MaxAirborneSeconds));
+			return false;
+		}
 	}
 
 	// 出口面 = 另一面。入口 B(竖直面)时出口 A(平面)= 竖直向下:就是"转成重力向下"。
@@ -151,17 +170,25 @@ bool UGSRedirectorComponent::TryBeginFaceCapture(AGSRollingBallPawn& Ball, const
 	if (!GetWorld() || !GetWorld()->LineTraceSingleByChannel(Hit, BallLoc, BallLoc - EntryFaceNormal * Reach,
 		ECC_WorldStatic, Params))
 	{
+		RejectLog(FString::Printf(TEXT("%s probe-miss(没探到面,可能悬空)"), Side));
 		return false;
 	}
 	if (Hit.GetActor() != GetOwner())
 	{
+		// 探到的是别的物体(高台本体网格 / 别的件)。本滑梯的"该进哪里"只认自己的圆弧。
+		RejectLog(FString::Printf(TEXT("%s probe-hit-other-actor=%s"), Side, *Hit.GetActor()->GetName()));
 		return false;
 	}
 
 	const FVector ContactNormal = Hit.Normal.GetSafeNormal();
-	if (FVector::DotProduct(ContactNormal, EntryFaceNormal) < FaceCaptureEntryNormalMin)
+	// A 面(高台)用更松的接触法线门:高速球可能已经压在圆弧上了(见头文件说明)。
+	const float EntryNormalMin = bEnterFromA
+		? FaceCaptureGroundEntryNormalMin : FaceCaptureEntryNormalMin;
+	if (FVector::DotProduct(ContactNormal, EntryFaceNormal) < EntryNormalMin)
 	{
 		// 贴的不是这一面(例如从平面那侧擦过) → 交给原弯道逻辑。
+		RejectLog(FString::Printf(TEXT("%s normal-mismatch dot=%.2f < %.2f"),
+			Side, FVector::DotProduct(ContactNormal, EntryFaceNormal), EntryNormalMin));
 		return false;
 	}
 
@@ -187,12 +214,8 @@ bool UGSRedirectorComponent::TryBeginFaceCapture(AGSRollingBallPawn& Ball, const
 	const float ApproachSpeedCm = FVector::DotProduct(Velocity, ApproachDir);
 	if (MinApproachSpeedCm > 0.0f && ApproachSpeedCm < MinApproachSpeedCm)
 	{
-		if (bDebugLog)
-		{
-			UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s face-capture rejected(%s): approach=%.0f < %.0f (球不是朝圆弧滚)"),
-				*GetNameSafe(GetOwner()), bGroundedEntry ? TEXT("A/high-platform") : TEXT("B/wall"),
-				ApproachSpeedCm, MinApproachSpeedCm);
-		}
+		RejectLog(FString::Printf(TEXT("%s approach=%.0f < %.0f (球不是朝圆弧滚)"),
+			Side, ApproachSpeedCm, MinApproachSpeedCm));
 		return false;
 	}
 
@@ -202,13 +225,13 @@ bool UGSRedirectorComponent::TryBeginFaceCapture(AGSRollingBallPawn& Ball, const
 
 	if (bDebugLog)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s face-capture: style=%s ball=(%.0f,%.0f,%.0f) n=(%.2f,%.2f,%.2f) %s→%s v=(%.0f,%.0f,%.0f) approach=%.0f"),
+		UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s face-capture: style=%s ball=(%.0f,%.0f,%.0f) n=(%.2f,%.2f,%.2f) %s→%s v=(%.0f,%.0f,%.0f) speed=%.0f approach=%.0f"),
 			*GetNameSafe(GetOwner()), bGroundedEntry ? TEXT("grounded") : TEXT("hard"),
 			BallLoc.X, BallLoc.Y, BallLoc.Z,
 			ContactNormal.X, ContactNormal.Y, ContactNormal.Z,
 			*GSGravity::GetDirectionDisplayName(bEnterFromA ? GravityDirectionA : GravityDirectionB),
 			*GSGravity::GetDirectionDisplayName(bEnterFromA ? GravityDirectionB : GravityDirectionA),
-			Velocity.X, Velocity.Y, Velocity.Z, ApproachSpeedCm);
+			Velocity.X, Velocity.Y, Velocity.Z, Speed, ApproachSpeedCm);
 	}
 	LastFireTime = GetWorld()->GetTimeSeconds();
 	return true;

@@ -490,18 +490,31 @@ void AGSRollingBallPawn::BeginFaceCapture(AActor* ChuteActor, FVector ContactNor
 	FaceCaptureSpeedCm = FMath::Max(DriveSpeedCm, 50.0f);
 	FaceCaptureStickAccelCm = FMath::Max(StickAccelCm, 0.0f);
 	FaceCaptureExitNormalDot = FMath::Clamp(ExitNormalDot, 0.1f, 0.999f);
-	FaceCapturePathCm = 0.0f;
 	FaceCaptureElapsedSeconds = 0.0f;
 	bFaceCaptureGravityCommitted = false;
 	bFaceCaptureGrounded = bGrounded;
 	FaceCaptureFloorSpeedCm = FMath::Max(FloorSpeedCm, 1.0f);
 	FaceCaptureCeilSpeedCm = FMath::Max(CeilSpeedCm, FaceCaptureFloorSpeedCm);
+	FaceCaptureSurfaceLostAcc = 0.0f;
+
+	// 入口法线不一定正好在"入口面法线"上:球快的时候一帧就跨过平面的那一段,是在圆弧中段
+	// 被接住的。这时**已经扫过**一段弧(θ0),把它换算成路程预先记上——重力旋转才会恰好在
+	// "接触法线到达出口面"的同一刻转完;否则收尾会变成"重力还没转完就被硬提交"的一跳。
+	//   EntryAngleDeg = 入口法线到**出口**法线的夹角 = 还**剩**多少度没扫(不是扫过的!)
+	//   扫过的 θ0 = 90° − EntryAngleDeg
+	// (⚠ 首版写反过:直接拿 EntryAngleDeg 当初值 → 一进吸附重力就跳完 87% 再慢慢补,
+	//  相机在进入瞬间被猛拽一下;2026-09-16 高速实测 entryAngle=79° 时暴露。)
+	const float EntryAngleDeg = FMath::RadiansToDegrees(
+		FMath::Acos(FMath::Clamp(FVector::DotProduct(Normal, ExitNormal), -1.0f, 1.0f)));
+	const float SweptAngleDeg = FMath::Clamp(90.0f - EntryAngleDeg, 0.0f, 90.0f);
+	FaceCapturePathCm = FaceCaptureRotateOverCm * (SweptAngleDeg / 90.0f);
 
 	// 进入这一帧就把球摁到面上并换上"沿面前进"的速度:否则球还带着离开面的速度,
 	// 会先弹出去再被拉回来,看起来就是"卡一下"。
 	// 温和吸附(球自己滚进圆弧)不能这么干——它本来就在好好滚,定速会把它拽一下;
 	// 只保留"沿面"那一半速度、切掉"正在离开面"的那一半即可。
 	const FVector Tangent = FVector::CrossProduct(FaceCaptureAxis, FaceCaptureCurrentNormal).GetSafeNormal();
+	const float EntrySpeedCm = BallCollision->GetPhysicsLinearVelocity().Size();
 	if (BallCollision->IsSimulatingPhysics())
 	{
 		BallCollision->WakeRigidBody();
@@ -528,11 +541,12 @@ void AGSRollingBallPawn::BeginFaceCapture(AActor* ChuteActor, FVector ContactNor
 
 	if (bFaceCaptureDebugLog)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[GSFaceCapture] begin chute=%s style=%s n=(%.2f,%.2f,%.2f) exitG=(%.2f,%.2f,%.2f) axis=(%.2f,%.2f,%.2f) speed=%.0f floor=%.0f ceil=%.0f"),
+		UE_LOG(LogTemp, Log, TEXT("[GSFaceCapture] begin chute=%s style=%s n=(%.2f,%.2f,%.2f) exitG=(%.2f,%.2f,%.2f) axis=(%.2f,%.2f,%.2f) speed=%.0f floor=%.0f ceil=%.0f entryAngle=%.0fdeg entryV=%.0f"),
 			*GetNameSafe(ChuteActor), bFaceCaptureGrounded ? TEXT("grounded") : TEXT("hard"),
 			Normal.X, Normal.Y, Normal.Z,
 			Target.X, Target.Y, Target.Z, Axis.X, Axis.Y, Axis.Z,
-			FaceCaptureSpeedCm, FaceCaptureFloorSpeedCm, FaceCaptureCeilSpeedCm);
+			FaceCaptureSpeedCm, FaceCaptureFloorSpeedCm, FaceCaptureCeilSpeedCm,
+			EntryAngleDeg, EntrySpeedCm);
 	}
 }
 
@@ -618,13 +632,31 @@ void AGSRollingBallPawn::UpdateFaceCapture(float DeltaSeconds)
 		if (World->LineTraceSingleByChannel(Hit, BallLoc,
 			BallLoc - FaceCaptureCurrentNormal * (Radius + FaceCaptureProbeReachCm), ECC_Visibility, Params))
 		{
-			if (Hit.GetActor() == FaceCaptureActor)
+			const FVector HitNormal = Hit.Normal.GetSafeNormal();
+			// 本滑梯件的面直接用;**不是本滑梯件**但法线跟当前法线足够连续(同一张连续曲面的
+			// 邻接网格,例如墙角那面墙、叠着摆的另一个滑梯件)也接受 —— 见头文件说明:
+			// 否则球绕到墙角时法线冻结、出口判定永远不满足,会被恒速甩飞。
+			if (Hit.GetActor() == FaceCaptureActor
+				|| FVector::DotProduct(HitNormal, FaceCaptureCurrentNormal) >= FaceCaptureSurfaceNormalMinDot)
 			{
 				bHasSurface = true;
 				GapCm = Hit.Distance - Radius;
-				FaceCaptureCurrentNormal = Hit.Normal.GetSafeNormal();
+				FaceCaptureCurrentNormal = HitNormal;
 			}
 		}
+	}
+
+	// 连续面也找不到的累计时长:超过阈值就放开(补完重力),不让"法线冻结+恒速切向"把球甩飞。
+	FaceCaptureSurfaceLostAcc = bHasSurface ? 0.0f : (FaceCaptureSurfaceLostAcc + Dt);
+	if (FaceCaptureSurfaceLostAcc >= FaceCaptureSurfaceLostSeconds)
+	{
+		EndFaceCapture();
+		if (bFaceCaptureDebugLog)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[GSFaceCapture] release reason=surface-lost(both own & continuous) elapsed=%.2fs"),
+				FaceCaptureElapsedSeconds);
+		}
+		return;
 	}
 
 	// 2) 沿面切向 = (旋转轴 × 当前法线):入口竖直面时朝上,出口平面时朝外,
@@ -651,7 +683,12 @@ void AGSRollingBallPawn::UpdateFaceCapture(float DeltaSeconds)
 		NormalSpeed = FMath::Min(FVector::DotProduct(CurrentVelocity, FaceCaptureCurrentNormal), 0.0f);
 		if (bHasSurface)
 		{
-			NormalSpeed += FMath::Clamp(-GapCm * FaceCaptureGapGain, -FaceCaptureCeilSpeedCm, 0.0f);
+			// **这一帧就把间隙合上**(而不是按间隙比例给一点力)。凸圆弧上球每帧会按 v²/ρ 往外
+			// 飘——900cm/s、R≈111 时约 0.7cm/帧;旧写法(Gap*Gain, gain=8)只能补 0.1cm/帧,
+			// 追不上,球就会越飘越远直到脱面(用户反馈"跑太快会飞出去"的主因)。
+			// 负间隙(压进面里)时 -Gap/Dt 为正,被 min 挡住 → 不会往外推,只收不放。
+			NormalSpeed = FMath::Min(NormalSpeed, -GapCm / Dt);
+			NormalSpeed = FMath::Max(NormalSpeed, -FaceCaptureCeilSpeedCm);
 		}
 	}
 	else
@@ -697,10 +734,12 @@ void AGSRollingBallPawn::UpdateFaceCapture(float DeltaSeconds)
 
 	if (bFaceCaptureDebugLog)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[GSFaceCapture] t=%.2f ball=(%.0f,%.0f,%.0f) n=(%.2f,%.2f,%.2f) tan=(%.2f,%.2f,%.2f) gap=%.0f surf=%d prog=%.0f/%.0f"),
+		UE_LOG(LogTemp, Log, TEXT("[GSFaceCapture] t=%.2f ball=(%.0f,%.0f,%.0f) n=(%.2f,%.2f,%.2f) tan=(%.2f,%.2f,%.2f) g=(%.2f,%.2f,%.2f) gap=%.0f surf=%d prog=%.0f/%.0f"),
 			FaceCaptureElapsedSeconds, BallLoc.X, BallLoc.Y, BallLoc.Z,
 			FaceCaptureCurrentNormal.X, FaceCaptureCurrentNormal.Y, FaceCaptureCurrentNormal.Z,
-			Tangent.X, Tangent.Y, Tangent.Z, GapCm, bHasSurface ? 1 : 0,
+			Tangent.X, Tangent.Y, Tangent.Z,
+			FaceCaptureGravityCurrent.X, FaceCaptureGravityCurrent.Y, FaceCaptureGravityCurrent.Z,
+			GapCm, bHasSurface ? 1 : 0,
 			FaceCapturePathCm, FaceCaptureRotateOverCm);
 	}
 }

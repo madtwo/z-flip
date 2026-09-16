@@ -656,6 +656,8 @@ public:
 	bool bFaceCaptureGrounded = false;
 	float FaceCaptureFloorSpeedCm = 300.0f;
 	float FaceCaptureCeilSpeedCm = 900.0f;
+	// 探针连续探不到面的累计时长(见 FaceCaptureSurfaceLostSeconds)。
+	float FaceCaptureSurfaceLostAcc = 0.0f;
 	// 释放后的冷却时长(s)与上次释放时刻(见 IsFaceCaptureCoolingDown)。
 	float FaceCaptureReleaseCooldownSeconds = 0.5f;
 	float FaceCaptureReleaseTime = -1000.0f;
@@ -682,7 +684,19 @@ public:
 	float FaceCaptureProbeReachCm = 60.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|FaceCapture", meta = (ClampMin = "0.5"))
-	float FaceCaptureGapGain = 8.0f;
+	float FaceCaptureGapGain = 16.0f;
+
+	// 探针打到的**不是本滑梯件**时的连续性兜底:命中面的法线跟当前法线余弦 ≥ 该值就认它
+	// 是"同一张连续曲面"照常采用。必要性(2026-09-16):球绕到墙角后探针打到的是墙体网格
+	// (墙和滑梯本来就拼在一起)而不是滑梯件 → 旧逻辑判"脱面":法线冻结、切向恒住,出口判定
+	// 永远不满足,球被恒定切向速度甩出去(用户反馈"跑太快会飞出去"的机制之一)。
+	// 有了它,墙面法线能正常更新 → 出口判定当场满足 → 正常落到墙上。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|FaceCapture", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FaceCaptureSurfaceNormalMinDot = 0.5f;
+
+	// 连续多少秒完全探不到面就放开(补完重力、交回控制):保险,不让"法线冻结+恒速"把球甩飞。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|FaceCapture", meta = (ClampMin = "0.05"))
+	float FaceCaptureSurfaceLostSeconds = 0.3f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|FaceCapture", meta = (ClampMin = "10.0"))
 	float FaceCaptureRotateOverCm = 180.0f;

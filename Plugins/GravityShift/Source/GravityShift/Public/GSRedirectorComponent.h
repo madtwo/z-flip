@@ -176,17 +176,31 @@ public:
 
 	// A 面(高台)进入的方向门(cm/s):球沿"朝着圆弧"的切向速度下限。这一条是用户要求的
 	// "方向符合要求才触发"的落点——球必须真的在往圆弧那边滚,而不是停在拐角上乱撞。
-	// 也是防止刚被温和吸附送到墙上的球在盒内被反方向再吸回去的第二道保险。
+	// 2026-09-16 用户反馈"上面判定敏感一些" → 150 降到 80:慢滚也该被接住,方向仍然管着。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector")
-	float FaceCaptureGroundMinApproachSpeedCm = 150.0f;
+	float FaceCaptureGroundMinApproachSpeedCm = 80.0f;
+
+	// A 面(高台)进入的**接触法线余弦下限**:比 B 面的 0.6 松得多。
+	// 原因:球快的时候一帧就跨过"平面"那一段,采样点可能已经压在圆弧上(30°~70°)——
+	// 只有把这些帧也算作合格入口,才抓得住高速球。旋转轴由两面法线叉积得出,入口法线斜一点
+	// 不影响旋转平面(只要不跟出口面法线平行)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FaceCaptureGroundEntryNormalMin = 0.35f;
+
+	// A 面(高台)进入允许的悬空时长(s):比 B 面的 0.2 松。跑快的球会"跳"(那些帧不算支撑态),
+	// 保持 0.2 的话高速球可能整段采样都落在"刚离地"上 → 一次也抓不到。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "0.0"))
+	float FaceCaptureGroundMaxAirborneSeconds = 0.35f;
 
 	// 温和吸附的切向速度下限/上限(cm/s):球滚得慢由下限兜底(保证走完圆弧),滚得快由
 	// 上限封顶(不和重力转出来的额外动能叠加成"飞出去")。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "20.0"))
 	float FaceCaptureGroundMinSpeedCm = 300.0f;
 
+	// 温和吸附的切向速度上限(cm/s):900→750(2026-09-16)。凸圆弧上的外飘量 ∝ v²;
+	// 除了逐帧合隙,把上限压低一档能让高速冲进来的球也不会把弧面"飘"出去。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "50.0"))
-	float FaceCaptureGroundMaxSpeedCm = 900.0f;
+	float FaceCaptureGroundMaxSpeedCm = 750.0f;
 
 	// 面吸附模式下是否**同时**保留旧的 90° 弯道逻辑(默认关)。
 	// 必须默认关的原因(2026-09-15 实测):吸附把球送到平面的那一帧,球正好贴着圆弧、

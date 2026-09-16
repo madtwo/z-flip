@@ -1927,3 +1927,63 @@ AimPitchDeg *= FMath::Lerp(CameraSqueezeAimPitchScale, 1.0f, LiftScale);   // Li
 > 备注:`CameraYawDegrees` 默认 0 → 相机初始朝 **+X**,与 PlayerStart 的旋转无关。所以"按 W 正对圆弧"没做(会让所有关卡的初始朝向跟着 PlayerStart 变,风险大于收益);要测新方向请朝 +Y 方向滚,或让相机转 90°。
 
 ---
+
+## 46. 2026-09-16 第二十五轮:特殊滑梯1号 **抗高速**(跑太快飞出去)+ A 面判定敏感化
+
+> 本轮起因(用户原话):"现在还有些问题 如果跑的太快可能飞出去 请你加强一下这个滑梯的特殊的吸附并且在上面的判定敏感一些。"
+
+### 46.1 根因(两条,都是代码级的,先看这段)
+
+1. **探针只认"本滑梯件"→ 法线冻结 → 恒速甩飞**。球绕到墙角后,探针沿 `-当前法线` 打到的
+   是**墙体网格**(墙和滑梯本来就拼在一起),`Hit.GetActor() != FaceCaptureActor` 被判成"脱面":
+   法线不更新、切向恒住,而出口判定要的是"法线转到出口面"——永远不满足 → 球被恒定的切向速度
+   一路甩出去。**这就是"跑太快会飞出去"的机制**。
+2. **温和吸附的合隙太弱**。凸圆弧上球每帧按 `v²/ρ` 往外飘(900cm/s、R≈111 时 ≈0.7cm/帧),
+   旧写法 `Gap × GapGain(=8)` 只能补 0.1cm/帧 → 追不上,球越飘越远直到真的脱面。
+
+### 46.2 修法
+
+| # | 改动 | 参数 |
+|---|---|---|
+| 1 | 探针**连续性兜底**:不是本滑梯件、但命中面法线与当前法线余弦 ≥ 阈值的,认作"同一张连续曲面"(邻接网格/邻接滑梯件)照常采用 → 法线能正常更新,出口判定当场满足 | `FaceCaptureSurfaceNormalMinDot = 0.5` |
+| 2 | **脱面超时释放**:连续探不到任何面 ≥ 阈值就补完重力放开(保险,不让恒速甩飞) | `FaceCaptureSurfaceLostSeconds = 0.3` |
+| 3 | 温和吸附改成**"这一帧就把间隙合上"**:`NormalSpeed = min(min(Vn,0), -Gap/Dt)` 并钳到 `-Ceil`;负间隙(压进面)时不往外推 | (无新参数) |
+| 4 | 温和吸附切向速度上限压低(外飘 ∝ v²) | `FaceCaptureGroundMaxSpeedCm 900→750` |
+| 5 | **A 面(高台)判定敏感化**:方向门放宽 / 接触法线门放宽 / 允许的悬空时长放宽(B 面一律不动) | `FaceCaptureGroundMinApproachSpeedCm 150→80`;新增 `FaceCaptureGroundEntryNormalMin = 0.35`(B 面仍 `FaceCaptureEntryNormalMin = 0.6`);新增 `FaceCaptureGroundMaxAirborneSeconds = 0.35`(B 面仍 `MaxAirborneSecondsForTrigger = 0.2`) |
+| 6 | 每帧日志加 `g=(重力)`;`begin` 行加 `entryAngle/entryV`;每个门失败都打 `face-capture rejected: <原因>`(排查"球滚过去没反应"直接看日志) | (调试) |
+
+⚠ **同时修掉本轮自己引入的一个 bug**(记录在案,避免下次再犯):中段入弧的"路程预推进"写反了——
+拿**剩余角**`acos(入口法线·出口法线)` 当初值,正确应拿**已扫过角** = `90° − 剩余角`。
+写反的后果:一进吸附重力就跳完 87% 再慢慢补,相机在进入瞬间被猛拽一下。
+(来源:高速实测 `entryAngle=79°`、`prog=158/180` 一眼看出初值不对。)
+
+### 46.3 实测证据(逐帧日志)
+
+| 场景 | 结果 |
+|---|---|
+| **高速冲进圆弧** `entryV=1601`(≈2.4× 正常) | 抓到时球正"跳"着、**离弧面 47cm**;合隙 47→11→3→0;重力逐帧 `(0,-0.51,-0.86)→(0,-0.80,-0.60)→(0,-0.98,-0.21)→(0,-1,0)` **平滑转完**;`release dot=0.98 reason=reached-plane`;**最终停在 y=-1151**(墙面 -1200 + 球半径 50 = 正贴墙)、`g=(0,-1,0)` —— **没飞出去** |
+| **反向高速**(墙上 +Z 冲,`entryV=1601`) | `style=hard` 入口 `n=(0,0.98,0.20)` → `end gravity=(0,0,-1)` → 回到高台 ✓ 原路径不回归 |
+| **正常速度** | 重力逐帧 `(0,-0.32,-0.95)→(0,-0.63,-0.77)→(0,-0.88,-0.48)→(0,-0.98,-0.18)→(0,-1,0)`;`gap` 全程 0~4mm(旧版高速会飘到 5cm+) |
+| **慢滚** `entryV=157` | 仍被接住(A 面方向门降到 80 的余量);走完 → 停回高台 `g=(0,0,-1)` |
+
+> 复现方法(给队友/自己):关卡里 PIE,选中小球 Actor,把 `bDebugAutoDriveForward=true` +
+> `DebugAutoDriveWorldDir=(0,1,0)`(高台朝圆弧)或 `(0,0,1)`(墙上冲圆弧),再按需把
+> `DriveAccelerationCm` 调到 600(慢滚)/ 40000(约 2.4× 高速)复现两端极限;`bFaceCaptureDebugLog=true`
+> 看逐帧。测完记得两处都清零。
+
+### 46.4 参数表(本轮新增/改动)
+
+| 参数 | 位置 | 默认 | 作用 |
+|---|---|---|---|
+| `FaceCaptureSurfaceNormalMinDot` | Pawn\|FaceCapture | 0.5 | 探针连续性兜底阈值(治"墙角法线冻结甩飞") |
+| `FaceCaptureSurfaceLostSeconds` | Pawn\|FaceCapture | 0.3 | 完全探不到面的释放阈值(保险) |
+| `FaceCaptureGapGain` | Pawn\|FaceCapture | 16(旧 8) | 硬吸附的合隙增益 |
+| `FaceCaptureGroundMaxSpeedCm` | Redirector | 750(旧 900) | 温和吸附切向速度上限 |
+| `FaceCaptureGroundMinApproachSpeedCm` | Redirector | 80(旧 150) | A 面方向门(越小越"敏感") |
+| `FaceCaptureGroundEntryNormalMin` | Redirector | 0.35 | **A 面专用**接触法线门(比 B 面 0.6 松) |
+| `FaceCaptureGroundMaxAirborneSeconds` | Redirector | 0.35 | **A 面专用**允许悬空时长(比 B 面 0.2 松) |
+
+**关卡未改**(`Re_Blockout.umap` 本轮无实质改动:这三个件的上述参数本来就没被序列化进图,一直跟着 C++ 默认走,
+所以调 C++ 默认即生效——顺手确认过这一点,以后改默认值不必再进关卡同步)。
+
+---
