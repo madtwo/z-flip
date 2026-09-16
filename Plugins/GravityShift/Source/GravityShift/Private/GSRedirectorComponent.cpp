@@ -93,8 +93,12 @@ bool UGSRedirectorComponent::IsBallTouchingChute(const USphereComponent& BallSph
 bool UGSRedirectorComponent::TryBeginFaceCapture(AGSRollingBallPawn& Ball, const USphereComponent& BallSphere,
 	const FVector& BallLoc, const FVector& Velocity, float Speed)
 {
-	if (Ball.IsFaceCapturing())
+	if (Ball.IsFaceCapturing() || Ball.IsFaceCaptureCoolingDown())
 	{
+		// 正在吸附中 / 刚刚释放(见 Pawn 的 FaceCaptureReleaseCooldownSeconds):
+		// 后者是双向的必需品——A→B 刚把球送上墙的那一帧,球还贴着墙、重力已是墙的重力,
+		// 本滑梯是三个件叠着摆的,另外两个件的触发盒同样罩着这颗球,不设冷却就会被它们
+		// 立刻反向吸回高台(来回弹)。冷却期内球已沿墙走开,探针打不到圆弧了。
 		return false;
 	}
 	// 支撑门(复用同一批开关):空中擦过竖直面的球不吸附。
@@ -162,29 +166,49 @@ bool UGSRedirectorComponent::TryBeginFaceCapture(AGSRollingBallPawn& Ball, const
 	}
 
 	// 沿面前进方向 = 旋转轴 × 接触法线(入口竖直面时朝上,出口平面时朝外)。
+	// 这个方向必然是"把接触法线往出口面转"的那一侧(轴就是这么构造的),不存在方向二义性;
+	// 反着滚的球由下面的方向门拒掉。
 	const FVector Axis = FVector::CrossProduct(EntryFaceNormal, ExitFaceNormal).GetSafeNormal();
 	const FVector ApproachDir = FVector::CrossProduct(Axis, ContactNormal).GetSafeNormal();
 	if (ApproachDir.IsNearlyZero())
 	{
 		return false;
 	}
-	if (FaceCaptureMinApproachSpeedCm > 0.0f
-		&& FVector::DotProduct(Velocity, ApproachDir) < FaceCaptureMinApproachSpeedCm)
+
+	// 吸附方式由**入口面**决定(用户 2026-09-16 "看人下菜"的落点):
+	//   · 入口 = B(竖直面):球是"掉下去弹起来擦到墙上"或"已经骑在墙上往上滚"——上一轮
+	//     已验收的路径,保持原硬吸附(定速沿面驱动),手感不动。
+	//   · 入口 = A(平面/高台):球是自己在地面上滚到圆弧的,走温和吸附——保留球自己的
+	//     切向速度,只切掉"离开面"的法向分量,靠重力随路程旋转把它贴到墙上。
+	const bool bGroundedEntry = bEnterFromA;
+	const float MinApproachSpeedCm = bGroundedEntry
+		? FaceCaptureGroundMinApproachSpeedCm
+		: FaceCaptureMinApproachSpeedCm;
+	const float ApproachSpeedCm = FVector::DotProduct(Velocity, ApproachDir);
+	if (MinApproachSpeedCm > 0.0f && ApproachSpeedCm < MinApproachSpeedCm)
 	{
+		if (bDebugLog)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s face-capture rejected(%s): approach=%.0f < %.0f (球不是朝圆弧滚)"),
+				*GetNameSafe(GetOwner()), bGroundedEntry ? TEXT("A/high-platform") : TEXT("B/wall"),
+				ApproachSpeedCm, MinApproachSpeedCm);
+		}
 		return false;
 	}
 
 	Ball.BeginFaceCapture(GetOwner(), ContactNormal, ExitGravity, FaceCaptureSpeedCm,
-		FaceCaptureStickAccelCm, FaceCaptureExitNormalDot);
+		FaceCaptureStickAccelCm, FaceCaptureExitNormalDot,
+		bGroundedEntry, FaceCaptureGroundMinSpeedCm, FaceCaptureGroundMaxSpeedCm);
 
 	if (bDebugLog)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s face-capture: ball=(%.0f,%.0f,%.0f) n=(%.2f,%.2f,%.2f) %s→%s v=(%.0f,%.0f,%.0f)"),
-			*GetNameSafe(GetOwner()), BallLoc.X, BallLoc.Y, BallLoc.Z,
+		UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s face-capture: style=%s ball=(%.0f,%.0f,%.0f) n=(%.2f,%.2f,%.2f) %s→%s v=(%.0f,%.0f,%.0f) approach=%.0f"),
+			*GetNameSafe(GetOwner()), bGroundedEntry ? TEXT("grounded") : TEXT("hard"),
+			BallLoc.X, BallLoc.Y, BallLoc.Z,
 			ContactNormal.X, ContactNormal.Y, ContactNormal.Z,
 			*GSGravity::GetDirectionDisplayName(bEnterFromA ? GravityDirectionA : GravityDirectionB),
 			*GSGravity::GetDirectionDisplayName(bEnterFromA ? GravityDirectionB : GravityDirectionA),
-			Velocity.X, Velocity.Y, Velocity.Z);
+			Velocity.X, Velocity.Y, Velocity.Z, ApproachSpeedCm);
 	}
 	LastFireTime = GetWorld()->GetTimeSeconds();
 	return true;
@@ -270,7 +294,7 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 
 	// ---- 特殊滑梯:面吸附(只对勾了 bFaceCaptureMode 的滑梯生效)----
 	// 放在弯道判定之前:球"从侧面碰到竖直面"这一下,旧逻辑会走 gate[side] 直接拒掉,
-	// 面吸附模式要接住的正是这一下。命中后由 Pawn 逐帧驱动到平面并提交重力。
+	// 面吸附模式要接住的正是这一下。命中后由 Pawn 逐帧驱动到另一面并提交重力。
 	if (bFaceCaptureMode)
 	{
 		if (TryBeginFaceCapture(*Ball, *BallSphere, BallLoc, Velocity, Speed))
@@ -279,8 +303,8 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		}
 		if (!bFaceCaptureAlsoClassic)
 		{
-			// 没吸附上(例如从平面那侧滚过)就什么都不做:否则吸附刚把球送到平面上,
-			// 旧弯道逻辑会在同一帧又把它甩回墙上。
+			// 没吸附上(例如从平面那侧滚过)就什么都不做:否则吸附刚把球送到另一面上,
+			// 旧弯道逻辑会在同一帧又把它甩回去。
 			return;
 		}
 	}

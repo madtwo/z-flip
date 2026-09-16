@@ -135,3 +135,33 @@ pawn  = unreal.GameplayStatics.get_player_pawn(w, 0)
 - **游戏内驱动会把注入速度"改向"**:用 `bDebugAutoDriveForward` 抵消松键刹车后,若驱动的方向与注入速度不同向,恢复帧的巨大 dt 会把速度直接盖成驱动方向——现象是"明明球就在触发盒里、速度也给了,就是不触发"(进入判定按方向判定)。对策:测"靠注入速度进入"的用例时把 `DriveAccelerationCm` 调低(100),让驱动只当"防刹车"用;测"靠驱动进入"的用例才需要大驱动力。
 - **相机航向是 Pawn 实例的残留状态**:自动驱动的方向 = 相机前向在支撑面上的投影,而航向在 PIE 会话里跨多次脚本累加(每次 `add_camera_look_input` 都是相对量)→ 同一会话里连续测多个方向会跑偏。对策:按**绝对角度**重设——读 `pawn.get_editor_property('camera_pivot').get_forward_vector()` 的水平分量反推当前航向角,再 `add_camera_look_input(目标角−当前角)`;或者每个方向用例重启一次 PIE。
 - **顺带:CDO 写入被引擎安全层拦**(`Blocked unsafe Python code: get_default_object() modification`)——调试开关只能在**实例**上 `set_editor_property`;这也解释了更早"改了 CDO、PIE 新实例读不到"的谜团(写入根本没生效)。
+
+## 无输入驱动的场景机制验证(2026-09-16 实测踩坑,写 C++ 玩法时最省时间的一招)
+
+**要验证的东西**:某个场景机制(滑梯/触发器/吸附)在"球滚进去/贴上去"时是否按设计工作。这种验证不需要人玩,但**不能靠注入速度**。
+
+1. **注入速度无效**:这个项目的球是"输入驱动"的 pawn——`ApplyMovement` 每帧按输入给力、无输入时按 `ReleaseBrakeHz` 指数刹车,还会 `SetPhysicsLinearVelocity`。远端注入 `set_physics_linear_velocity(600)` 实测**只挪了 5cm**(3s 真实时间)。刚体睡眠也会吃掉速度。
+2. **正确姿势:加一个"世界方向强制驱动"调试钩子**(本仓库已有 `bDebugAutoDriveForward` 走驱动分支,再加 `DebugAutoDriveWorldDir` 覆盖驱动方向为世界向量):
+   - `Desired = Forward*MoveInput.Y + Right*MoveInput.X;` 之后 `if (!DebugAutoDriveWorldDir.IsNearlyZero()) Desired = DebugAutoDriveWorldDir;`
+   - 于是"把球放在高台上、让它朝圆弧滚"变成两条属性设置,可反复复现,还能把同样的钩子交给用户/队友自测。
+   - 注意:**绕过输入投影会让球"顶着支撑面推"**,比如球落在墙上后仍被往墙里推 → 出现"冷却一过就被反向吸回"的假 ping-pong。判断真实性看:真实 WASD 方向是投影到支撑面上的(`Forward -= Up*dot(Forward,Up)`),推不进面。
+3. **PIE 怎么起**:`LevelEditorSubsystem.editor_play_simulate()` 是 **Simulate 模式 = 给你一个 SpectatorPawn、根本不生成小球**(`get_all_actors_of_class(GSRollingBallPawn)` 返回空)。要真的球,用 `editor_request_begin_play()`(不是 `editor_play_in_editor`,后者在本版 Python 里不存在);`is_in_play_in_editor()` 会滞后一拍才是 True,给它 ~20s。
+4. **编辑器在后台会被深度节流**:3s 真实时间里 PIE 只推进约 0.1s 游戏时间。跨脚本观测一律"发射 → 真实 sleep 15~40s → 读",别用短 sleep 下结论。
+5. **`log` 是主证据**:把逐帧日志写在子步级(开始/每 0.1s/释放)比任何采样都可靠;`grep -a`(日志含二进制字节)读 `Saved/Logs/<项目>.log`,注意 grep 到的是**历史累积**,对比前后行数才知道本轮新增了什么。
+
+## UE 5.8 Python API 小坑(本轮新踩)
+
+- `HitResult` **没有直接字段**(`r.impact_point` 报 AttributeError)→ 用 `r.to_dict()`(键:`blocking_hit`/`impact_point`/`impact_normal`/`hit_actor`/`hit_component`)或 `get_editor_property`。
+- `SceneComponent` 没有 `get_component_location()` → 用 `get_world_location()`。
+- `PlayerController` 没有 `get_pawn()` → 用 `get_editor_property('pawn')`。
+- `unreal.Vector` 没有 `.size()`/`.size()` → 手算 `((a-b).x**2+...) ** 0.5`。
+- `get_all_actors_of_class(w, unreal.StaticMeshActor)` **漏掉蓝图派生的 actor**(如 `Blockout_Corner_Curved_C`)→ 找组件/找特定 actor 一律枚举 `unreal.Actor` 再 `get_components_by_class(...)`。
+- 关卡 actor 上的组件属性:`c.get_editor_property('X')` / `c.set_editor_property('X', v)`,改完 `unreal.EditorLevelLibrary.save_current_level()` 返回 True/False 要打印出来核对。
+
+## 关卡几何速查:用射线画剖面
+
+不知道"球会滚到哪一面/往哪个方向滚"时,别猜——在编辑器世界(`EditorLevelLibrary.get_editor_world()`)里扫射线:
+
+- 竖扫(找平台顶面/圆弧起点):`line_trace_single(w, (x,y,-250), (x,y,-900), TraceTypeQuery.ECC_VISIBILITY, True, [], DrawDebugTrace.NONE, True)`,沿 y 每 10~20cm 一次,打印 `impact_point.z` + `impact_normal` + actor 名,就能看出"平面 → 圆角(法线在转)→ 竖直面"的剖面和圆角半径。
+- 横扫(找竖直面):固定 z,从远处朝面打,法线 (0,±1,0) 即竖直墙,命中 y 就是墙面位置。
+- 这比在 PIE 里"试出来"快一个数量级;本文的 90° 圆角几何(A 面 z=−500 / B 面 y=−1200 / R≈111)就是 3 次扫描画出来的。

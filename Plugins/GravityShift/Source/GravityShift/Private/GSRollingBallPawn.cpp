@@ -459,7 +459,8 @@ void AGSRollingBallPawn::UpdateGravityRedirect(float DeltaSeconds)
 // 碰到就吸附,沿曲面切向把它自然带到平面(平行地面的那一面),走到平面时重力正好转到位。
 // 触发由 UGSRedirectorComponent 的 bFaceCaptureMode 负责,只给关卡里那条特殊滑梯用。
 void AGSRollingBallPawn::BeginFaceCapture(AActor* ChuteActor, FVector ContactNormal, FVector ExitGravity,
-	float DriveSpeedCm, float StickAccelCm, float ExitNormalDot)
+	float DriveSpeedCm, float StickAccelCm, float ExitNormalDot,
+	bool bGrounded, float FloorSpeedCm, float CeilSpeedCm)
 {
 	const FVector Normal = ContactNormal.GetSafeNormal();
 	const FVector Target = ExitGravity.GetSafeNormal();
@@ -492,16 +493,32 @@ void AGSRollingBallPawn::BeginFaceCapture(AActor* ChuteActor, FVector ContactNor
 	FaceCapturePathCm = 0.0f;
 	FaceCaptureElapsedSeconds = 0.0f;
 	bFaceCaptureGravityCommitted = false;
+	bFaceCaptureGrounded = bGrounded;
+	FaceCaptureFloorSpeedCm = FMath::Max(FloorSpeedCm, 1.0f);
+	FaceCaptureCeilSpeedCm = FMath::Max(CeilSpeedCm, FaceCaptureFloorSpeedCm);
 
 	// 进入这一帧就把球摁到面上并换上"沿面前进"的速度:否则球还带着离开面的速度,
 	// 会先弹出去再被拉回来,看起来就是"卡一下"。
+	// 温和吸附(球自己滚进圆弧)不能这么干——它本来就在好好滚,定速会把它拽一下;
+	// 只保留"沿面"那一半速度、切掉"正在离开面"的那一半即可。
 	const FVector Tangent = FVector::CrossProduct(FaceCaptureAxis, FaceCaptureCurrentNormal).GetSafeNormal();
 	if (BallCollision->IsSimulatingPhysics())
 	{
 		BallCollision->WakeRigidBody();
 		if (!Tangent.IsNearlyZero())
 		{
-			BallCollision->SetPhysicsLinearVelocity(Tangent * FaceCaptureSpeedCm);
+			if (bFaceCaptureGrounded)
+			{
+				const FVector EntryVelocity = BallCollision->GetPhysicsLinearVelocity();
+				const float TangentialSpeed = FMath::Clamp(FVector::DotProduct(EntryVelocity, Tangent),
+					FaceCaptureFloorSpeedCm, FaceCaptureCeilSpeedCm);
+				const float InwardSpeed = FMath::Min(FVector::DotProduct(EntryVelocity, FaceCaptureCurrentNormal), 0.0f);
+				BallCollision->SetPhysicsLinearVelocity(Tangent * TangentialSpeed + FaceCaptureCurrentNormal * InwardSpeed);
+			}
+			else
+			{
+				BallCollision->SetPhysicsLinearVelocity(Tangent * FaceCaptureSpeedCm);
+			}
 		}
 	}
 	if (GravityBody)
@@ -511,9 +528,11 @@ void AGSRollingBallPawn::BeginFaceCapture(AActor* ChuteActor, FVector ContactNor
 
 	if (bFaceCaptureDebugLog)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[GSFaceCapture] begin chute=%s n=(%.2f,%.2f,%.2f) exitG=(%.2f,%.2f,%.2f) axis=(%.2f,%.2f,%.2f) speed=%.0f"),
-			*GetNameSafe(ChuteActor), Normal.X, Normal.Y, Normal.Z,
-			Target.X, Target.Y, Target.Z, Axis.X, Axis.Y, Axis.Z, FaceCaptureSpeedCm);
+		UE_LOG(LogTemp, Log, TEXT("[GSFaceCapture] begin chute=%s style=%s n=(%.2f,%.2f,%.2f) exitG=(%.2f,%.2f,%.2f) axis=(%.2f,%.2f,%.2f) speed=%.0f floor=%.0f ceil=%.0f"),
+			*GetNameSafe(ChuteActor), bFaceCaptureGrounded ? TEXT("grounded") : TEXT("hard"),
+			Normal.X, Normal.Y, Normal.Z,
+			Target.X, Target.Y, Target.Z, Axis.X, Axis.Y, Axis.Z,
+			FaceCaptureSpeedCm, FaceCaptureFloorSpeedCm, FaceCaptureCeilSpeedCm);
 	}
 }
 
@@ -541,6 +560,7 @@ void AGSRollingBallPawn::EndFaceCapture()
 	FaceCaptureActor = nullptr;
 	FaceCapturePathCm = 0.0f;
 	FaceCaptureElapsedSeconds = 0.0f;
+	FaceCaptureReleaseTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 
 	if (bFaceCaptureDebugLog)
 	{
@@ -552,6 +572,20 @@ void AGSRollingBallPawn::EndFaceCapture()
 FVector AGSRollingBallPawn::GetFaceCaptureNormal() const
 {
 	return bFaceCaptureActive ? FaceCaptureCurrentNormal : FVector::ZeroVector;
+}
+
+bool AGSRollingBallPawn::IsFaceCaptureCoolingDown() const
+{
+	if (FaceCaptureReleaseCooldownSeconds <= 0.0f)
+	{
+		return false;
+	}
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+	return (World->GetTimeSeconds() - FaceCaptureReleaseTime) < FaceCaptureReleaseCooldownSeconds;
 }
 
 void AGSRollingBallPawn::UpdateFaceCapture(float DeltaSeconds)
@@ -603,18 +637,38 @@ void AGSRollingBallPawn::UpdateFaceCapture(float DeltaSeconds)
 	}
 
 	// 3) 速度 = 切向驱动 + 法向合拢(离面就把球拉回来;凸面上被甩开的趋势也吃这一步)。
-	const float NormalSpeed = bHasSurface
-		? FMath::Clamp(-GapCm * FaceCaptureGapGain, -FaceCaptureSpeedCm, FaceCaptureSpeedCm)
-		: 0.0f;
+	//    温和吸附里"切向驱动"不是定速,而是球自己的切向速度钳进 [floor, ceil]:球滚得快就
+	//    走快、重力也随路程转得快(不会出现"球还在坡上重力已转完"),滚得慢就由下限兜底。
+	//    法向只切掉"正在离开面"的那一半(>0 的分量),再加一点随间隙的合拢——比硬吸附轻,
+	//    但同样不允许它自己飞离弧面。
+	float DriveSpeedCm = FaceCaptureSpeedCm;
+	float NormalSpeed = 0.0f;
+	if (bFaceCaptureGrounded)
+	{
+		const FVector CurrentVelocity = BallCollision->GetPhysicsLinearVelocity();
+		DriveSpeedCm = FMath::Clamp(FVector::DotProduct(CurrentVelocity, Tangent),
+			FaceCaptureFloorSpeedCm, FaceCaptureCeilSpeedCm);
+		NormalSpeed = FMath::Min(FVector::DotProduct(CurrentVelocity, FaceCaptureCurrentNormal), 0.0f);
+		if (bHasSurface)
+		{
+			NormalSpeed += FMath::Clamp(-GapCm * FaceCaptureGapGain, -FaceCaptureCeilSpeedCm, 0.0f);
+		}
+	}
+	else
+	{
+		NormalSpeed = bHasSurface
+			? FMath::Clamp(-GapCm * FaceCaptureGapGain, -FaceCaptureSpeedCm, FaceCaptureSpeedCm)
+			: 0.0f;
+	}
 	BallCollision->WakeRigidBody();
-	BallCollision->SetPhysicsLinearVelocity(Tangent * FaceCaptureSpeedCm + FaceCaptureCurrentNormal * NormalSpeed);
+	BallCollision->SetPhysicsLinearVelocity(Tangent * DriveSpeedCm + FaceCaptureCurrentNormal * NormalSpeed);
 	if (FaceCaptureStickAccelCm > 0.0f)
 	{
 		BallCollision->AddForce(-FaceCaptureCurrentNormal * FaceCaptureStickAccelCm, NAME_None, true);
 	}
 
 	// 4) 重力按走过的路程旋转(与转向器滑行同一节奏:走到平面 = 正好转到位)。
-	FaceCapturePathCm += FaceCaptureSpeedCm * Dt;
+	FaceCapturePathCm += DriveSpeedCm * Dt;
 	const float Alpha = FMath::Clamp(FaceCapturePathCm / FMath::Max(FaceCaptureRotateOverCm, 1.0f), 0.0f, 1.0f);
 	const float Eased = Alpha * Alpha * (3.0f - 2.0f * Alpha);
 	const FQuat Delta = FQuat::FindBetweenNormals(FaceCaptureGravityFrom, FaceCaptureGravityTo);
@@ -1416,6 +1470,11 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 		Right = FVector::CrossProduct(Up, Forward);
 	}
 	FVector Desired = Forward * MoveInput.Y + Right * MoveInput.X;
+	// Debug:世界方向强制驱动(验证场景机制用;零向量 = 不介入,见头文件说明)。
+	if (!DebugAutoDriveWorldDir.IsNearlyZero())
+	{
+		Desired = DebugAutoDriveWorldDir;
+	}
 	if (!Desired.Normalize())
 	{
 		return;

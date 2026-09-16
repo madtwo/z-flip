@@ -1865,3 +1865,65 @@ AimPitchDeg *= FMath::Lerp(CameraSqueezeAimPitchScale, 1.0f, LiftScale);   // Li
 | `bFaceCaptureMode` 等 8 项 | Redirector | — | 特殊滑梯1号的吸附参数(§32.1 有表) |
 
 ---
+
+## 45. 2026-09-16 第二十四轮:特殊滑梯1号 **双向面吸附**(队友需求)+ 高台出生点
+
+> 本轮起因(队友原话):"特殊滑梯1号不但要小球弹起来蹭到垂直部分后能够吸上去到平面,还要能小球已经到了那个高台后再对着那个圆弧移动也能把重力贴在墙上,反过来也是,要双向性";并建议"看人下菜:掉下去弹起来的弹射状态就用原来的,已经在地上了或者贴在墙上了就做个正常重力转化算法"。
+
+### 45.1 关卡几何(实测 trace,先看这段再谈算法)
+
+三件 `Blockout_Corner_Curved_C_1/_0/_4` 在 (3500/3600/3700, −1300, −600),pitch=90°(圆角轴沿 X)。射线实测剖面:
+
+| 位置 | 面 | 外法线 | 该面重力 | 命中 actor |
+|---|---|---|---|---|
+| z=−500,**y ≤ −1305** | 高台顶面(=A 面) | (0,0,1) | `NEGATIVE_Z` | `StaticMeshActor_21`(`CubeGridToolOutput_46101D2B`) |
+| y≈−1300 … −1205 | 圆角(半径≈111) | 由 (0,0.20,0.98) 转到 (0,0.83,0.56) | — | `Blockout_Corner_Curved_C_*` |
+| **y=−1200**,z=−600 … −1300 | 竖直墙(=B 面) | (0,1,0) | `NEGATIVE_Y` | `StaticMeshActor_21` |
+| z=−1300,y > −1200 | 墙下方地面 | (0,0,1) | — | `StaticMeshActor_21` |
+
+所以两个方向分别是:**A→B** 平台 →(+Y)→ 绕圆角 → 墙上沿 −Z 下滑;**B→A** 墙 →(+Z)→ 绕圆角 → 平台上沿 −Y 滚出。
+`Axis = cross(入口面法线, 出口面法线)`,`Tangent = Axis × 当前法线` 必然把法线往出口面转,**不存在方向二义性**;反着滚的球由方向门拒掉。
+
+### 45.2 实现(4 处代码 + 1 处关卡)
+
+1. **吸附方式由入口面决定**(用户说的"看人下菜"落地):
+   - 入口 = **B(竖直墙)**:球是"弹起来擦到墙"或"已经骑在墙上往上滚"——**上一轮已验收的路径,原样不动**(定速 700 沿面驱动)。
+   - 入口 = **A(平台/高台)**:球是自己在地面上滚到圆弧的 → **温和吸附**:切向保留球自己的速度(只钳进 `[300,900]`),法向只切掉"正在离开面"的那一半 + 一点随间隙的合拢;重力照旧按**实际路程**旋转,走到圆弧尽头正好转成墙的重力。
+   - 代码:`AGS RollingBallPawn::BeginFaceCapture(... bGrounded, FloorSpeedCm, CeilSpeedCm)` / `UpdateFaceCapture` 内分流 `DriveSpeedCm`。
+2. **A 面进入加"方向门"**(用户要求"加速度符合方向要求才触发"):`FaceCaptureGroundMinApproachSpeedCm = 150`,球沿"朝圆弧"的切向速度不够就**不触发**,并在 `bDebugLog` 下打 `face-capture rejected(A/high-platform): approach=… < 150`。B 面那一侧仍是 0(碰到就吸,不改手感)。
+3. **释放冷却 0.5s**(`FaceCaptureReleaseCooldownSeconds`,Pawn 侧):三件滑梯触发盒互相重叠,A→B 刚把球送上墙的那一帧球还贴着圆弧、重力已是墙的重力,**实测另一个件隔 0.67s 就会把它反向吸回高台**。冷却期内球已沿墙走开(探针打不到圆弧),自然不再触发。
+4. **关卡**:三件 `bCaptureEntryFromA = true`(原为 false,所以上一轮只有"吸上去"这一个方向);**出生点搬到高台 (3600,−1560,−430)** 方便直接测(弧面在前方 +Y 约 250cm)。
+5. **新增调试钩子** `DebugAutoDriveWorldDir`(Pawn|Debug,默认零向量):配合 `bDebugAutoDriveForward` 用**世界方向**强制驱动,用于"不靠输入注入"验证场景机制。本轮的双向验证就是靠它。
+
+### 45.3 验收证据(逐帧日志,`Saved/Logs/z-flip.log`)
+
+| 项 | 证据 |
+|---|---|
+| **新方向 A→B** | `begin style=grounded n=(0,0.20,0.98) exitG=(0,-1,0) axis=(-1,0,0)`;逐帧 `tan` 由 (0,0.98,−0.20) 连续转到 (0,0.56,−0.83);球 y −1262→−1167、z −457→−533 绕弧下走;`release dot=0.98 elapsed=1.7~1.8s reason=reached-plane`;**`end gravity=(0,−1,0)`** ✓ |
+| **原方向 B→A 不回归** | `begin style=hard n=(0,0.83,0.56) exitG=(0,0,-1)` → `end gravity=(0,0,-1)` ✓(仍是硬吸附那条路径) |
+| **方向门真的在拦** | 球在触发盒内朝 **−Y 反着滚**:`[GSRedirector] … face-capture rejected(A/high-platform): approach=-193 < 150(球不是朝圆弧滚)` ✓ |
+| **不会来回弹** | 关掉驱动后等 40s:捕获数不再增长,球静止于墙角 `gravity=(0,0,-1)` ✓ |
+| **出生点** | 按 Play 落在 (3600,−1559,−450) 高台上 ✓(不再是世界原点回退) |
+
+⚠ **测试里出现过的"ping-pong"是假象**:我用世界方向强制 +Y 时,等于让球**一直往墙里推**(真实 WASD 的驱动方向是投影到支撑面上的,推不进墙),所以球被摁在圆弧上、冷却一过就被反向吸回。真实操作下不会发生——上表第 4 行是关掉强制驱动后的实测。
+
+### 45.4 合入三步(队友侧照做)
+
+1. `pull` 本轮源码 → **关编辑器** → 重编 → 校验 `Plugins/GravityShift/Binaries/Win64/UnrealEditor-GravityShift.dll` 比源码新。
+2. 拉取 `Re_Blockout.umap`(含:三件 `bCaptureEntryFromA=true`、出生点搬到高台)。**若你本地还开着旧关卡会话,先关再开再改**,别用内存旧状态保存盖掉(§32.5 出过事故)。
+3. PIE 验收:出生点直接在高台上 → 朝 **+Y**(弧面方向)滚 → 应被"温和吸附"带走、绕到墙上、重力变 −Y;再从墙上朝 +Z 滚回圆弧 → 应被原硬吸附送回平台、重力变回 −Z。
+
+### 45.5 本轮新增可调参数
+
+| 参数 | 位置 | 默认 | 作用 |
+|---|---|---|---|
+| `bCaptureEntryFromA` | Redirector | 关卡里已置 true | 允许"从高台滚进圆弧"这一侧(新方向) |
+| `FaceCaptureGroundMinApproachSpeedCm` | Redirector | 150 | **方向门**:朝圆弧的切向速度下限(0 = 碰到就吸) |
+| `FaceCaptureGroundMinSpeedCm` | Redirector | 300 | 温和吸附切向速度下限(慢了也保证走完圆弧) |
+| `FaceCaptureGroundMaxSpeedCm` | Redirector | 900 | 温和吸附切向速度上限(别把动能叠成"飞出去") |
+| `FaceCaptureReleaseCooldownSeconds` | Pawn\|FaceCapture | 0.5 | 释放后冷却(治多个件叠着摆的来回弹) |
+| `DebugAutoDriveWorldDir` | Pawn\|Debug | (0,0,0) | 世界方向强制驱动(配合 `bDebugAutoDriveForward` 做无输入验证) |
+
+> 备注:`CameraYawDegrees` 默认 0 → 相机初始朝 **+X**,与 PlayerStart 的旋转无关。所以"按 W 正对圆弧"没做(会让所有关卡的初始朝向跟着 PlayerStart 变,风险大于收益);要测新方向请朝 +Y 方向滚,或让相机转 90°。
+
+---

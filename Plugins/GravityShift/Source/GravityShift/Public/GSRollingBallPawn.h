@@ -128,6 +128,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Debug")
 	bool bDebugAutoDriveForward = false;
 
+	// Debug: 世界坐标强制驱动方向(零向量 = 关闭)。用来**不靠输入**验证场景机制(例如
+	// "球在高台上朝圆弧滚过去"):配合 bDebugAutoDriveForward 使用——后者让 ApplyMovement
+	// 走驱动分支,前者把驱动方向从"相机相对"换成这个世界方向。测完清成零向量。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Debug")
+	FVector DebugAutoDriveWorldDir = FVector::ZeroVector;
+
 	// Debug: 强制进入瞄准态,不需要按右键。用途:**瞄准相机的穿模/贴脸淡出只能在瞄准态复现**,
 	// 而本机 PIE 收不到注入的鼠标事件(UE 用 raw input,注入事件被忽略)→ 用脚本设这个开关,
 	// 就能纯 Python 读取 FOV/SocketOffset/臂长/相机位来自动验收(2026-09-15 立)。
@@ -553,9 +559,15 @@ public:
 	//   ExitGravity     走完后要转到的重力方向(例如 (0,0,-1) = 向下)
 	//   DriveSpeedCm    沿面驱动速度;StickAccelCm 压向面的加速度
 	//   ExitNormalDot   接触法线与出口面法线的余弦达标即释放(0.85 ≈ 32°)
+	//   bGrounded       **温和吸附**(2026-09-16 双向需求):true = 球是自己在地面/高台上
+	//                   滚到圆弧的,保留它自己的切向速度(只钳进 [FloorSpeedCm, CeilSpeedCm]),
+	//                   法向也只切掉"正在离开面"的那一半——玩家主动滚过去时不会被定速拽一下。
+	//                   false = 原硬吸附:进入瞬间换成定速沿面驱动(给"弹起来擦到面"的球)。
+	//   FloorSpeedCm / CeilSpeedCm  温和吸附的切向速度下限/上限(硬吸附忽略这两个值)。
 	UFUNCTION(BlueprintCallable, Category = "GravityShift")
 	void BeginFaceCapture(AActor* ChuteActor, FVector ContactNormal, FVector ExitGravity,
-		float DriveSpeedCm, float StickAccelCm, float ExitNormalDot);
+		float DriveSpeedCm, float StickAccelCm, float ExitNormalDot,
+		bool bGrounded, float FloorSpeedCm, float CeilSpeedCm);
 
 	// 放弃吸附(超时/脱面/出口判定已到时调用):补完重力旋转并交回玩家控制。
 	UFUNCTION(BlueprintCallable, Category = "GravityShift")
@@ -563,6 +575,12 @@ public:
 
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
 	bool IsFaceCapturing() const { return bFaceCaptureActive; }
+
+	// 刚结束一次面吸附后的冷却(2026-09-16 双向必需品):A→B 把球送上墙的那一帧,球还贴着
+	// 同一段圆弧、重力已经是墙的重力——本关卡三个滑梯件叠着摆,触发盒互相重叠,不设冷却
+	// 会被另一个件立刻反向吸回高台(来回弹)。冷却期内球已沿墙走开,探针打不到圆弧了。
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
+	bool IsFaceCaptureCoolingDown() const;
 
 	// 吸附中的实时接触面法线(转向器日志用;未吸附时返回零向量)。
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
@@ -632,6 +650,15 @@ public:
 	FVector FaceCaptureGravityTo = FVector(0.0, 0.0, -1.0);
 	FVector FaceCaptureGravityCurrent = FVector(0.0, 0.0, -1.0);
 	float FaceCaptureSpeedCm = 700.0f;
+	// 温和吸附(=球自己在地面/高台上滚进圆弧那一侧)用:切向速度不再定速,而是把球自己的
+	// 速度钳进 [Floor, Ceil];下限保证球慢也能走完圆弧,上限防"高速冲进来被加重力转出来的
+	// 额外动能"顶飞。
+	bool bFaceCaptureGrounded = false;
+	float FaceCaptureFloorSpeedCm = 300.0f;
+	float FaceCaptureCeilSpeedCm = 900.0f;
+	// 释放后的冷却时长(s)与上次释放时刻(见 IsFaceCaptureCoolingDown)。
+	float FaceCaptureReleaseCooldownSeconds = 0.5f;
+	float FaceCaptureReleaseTime = -1000.0f;
 
 	// ---- 楼梯强化状态(瞬时,非反射) ----
 	// 垂直速度的指数均值:用来判"当前是不是在下坡"。硬约束只在下坡趋势时生效——
