@@ -32,6 +32,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	bool bEnabled = true;
 
+	// 落地响应总闸(2026-09-17 用户要求):关掉后**落地**只有一种结果——安静停住,
+	// 既不弹跳(BOUNCE)也不反转重力(LANDING_RESPONSE)。空中的落体阈值反转
+	// (TickComponent 的 MID_AIR 段)不受这里影响,仍按 AutoReverseMode 走。
+	// 默认关:本作不要"落地弹一下"和"砸重了翻重力"这两种反馈。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
+	bool bEnableLandingResponses = false;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	EGSAutoReverseMode AutoReverseMode = EGSAutoReverseMode::LANDING_IMPACT;
 

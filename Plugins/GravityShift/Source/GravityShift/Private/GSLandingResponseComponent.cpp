@@ -335,7 +335,8 @@ void UGSLandingResponseComponent::HandleLanding(float ImpactSpeedCm)
 		return;
 	}
 
-	if (ImpactSpeedCm <= Mod.NoResponseBelowImpactSpeedCm)
+	// 总闸关掉时,砸得再狠也只走"安静落地":清零法向速度 + 进入稳定窗口。
+	if (!bEnableLandingResponses || ImpactSpeedCm <= Mod.NoResponseBelowImpactSpeedCm)
 	{
 		Report.Action = EGSLandingResponseAction::NONE;
 		// A quiet landing resets the one-bounce cycle: the next bounce-band
