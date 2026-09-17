@@ -205,7 +205,7 @@ void AGSGravityHUD::DrawHUD()
 
 	if (bShowControls)
 	{
-		Lines.Add(TEXT("WASD roll  |  RMB aim / LMB flip object gravity  |  Q/E camera dist  |  O/P speed  |  F interact  |  R reset"));
+		Lines.Add(TEXT("WASD roll  |  RMB aim / LMB flip object gravity  |  Q/E or wheel camera dist  |  O/P speed  |  F interact  |  R reset"));
 	}
 
 	float Y = StartPosition.Y;
