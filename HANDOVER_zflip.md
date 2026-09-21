@@ -9,6 +9,8 @@
 > **§26 = 2026-09-12 第十八轮交付：「手感还原」交接——用户实机验收的最新手感(丝滑相机+球下1/3+平面加速度驱动)就是主线 `2c3c1a2` 的默认状态,谁都不用改任何参数;队友端"操作老版本"= dll 没重编(源码/资产都是新的)。还原步骤+手感验收清单+参数基准+禁改清单见 §26;PIE 调试 HUD 顶部新增 `GS build <编译时间>` 一行,一秒鉴定 dll 新旧**
 > **§27 = 2026-09-12 第十九轮交付：新重力机制(用户四条需求,实机验收通过)——①G/1/2/3 删除,物体重力只剩 ±Z;②玩家重力只由转向器圆弧控制;③按住右键出准星(TPS 聚焦+越肩+边缘微光)左键切换方块升/降;④导轨相机/重力开关退场,默认无导轨相机。组装手册 `AgentSkill/gs-aim-gravity-assembly/SKILL.md`;实现记录与两条泛用定式见 §27**
 > **§29 = 2026-09-13 第二十一轮：方块「非竖直重力」功能(GravityAxisLocal,零向量=老行为)+ P2 两个 LDI_Gravityshift 转向器化 + 2/3/4 号瞄准开火改造 + 4 号「开火没用」诊断(结论:出生位被几何夹死)**;全部只动 `Re_Blockout.umap` + GSBlockBase 两个源码文件,dll 已重编。4 号上限已从 3000 降到 500,但**它在出生位仍不可动,建议换位/抬高,见 §29.5**
+> **§47 = 2026-09-17:鼠标滚轮缩放相机(滚轮 = Q/E 同一条调距路径,一格 = 一步 Q/E)**;只动 3 个源码文件、不动关卡。**⚠ 首版编译通过但用户实测"没反应",当天挖出根因并修正:Q/E 调距从 §27 切到无轨相机起就一直是死的(写错了对象 + 分流条件恒真),滚轮只是继承了这条路 —— 详见 §47.9,那份才是最终修法。**
+> **§47.10 = 同日续:按用户实测反馈反转滚轮方向(前滚 = 拉近,只翻滚轮调用点)+ 新增调距平滑层 `CameraZoomInterpSpeed`(只平滑"目标",不碰探针链)。调手感只需改 2 个 EditAnywhere 参数,不用重编。**
 > 写这份文档的目的：先把做到哪、卡在哪、改了什么、踩了什么雷同步清楚，供人工诊断。
 
 ---
@@ -1987,3 +1989,204 @@ AimPitchDeg *= FMath::Lerp(CameraSqueezeAimPitchScale, 1.0f, LiftScale);   // Li
 所以调 C++ 默认即生效——顺手确认过这一点,以后改默认值不必再进关卡同步)。
 
 ---
+
+## 47. 2026-09-17:鼠标滚轮缩放相机(滚轮 = Q/E 同一条调距路径)
+
+> 本轮起因(用户原话):"我现在想要加一个功能,那就是玩家使用鼠标滚轮的时候可以调节摄像机的缩放"
+
+**只动 C++、不动关卡。** 3 个文件 `+29 / −19` 行,UBT 编译通过,`UnrealEditor-GravityShift.dll`
+已落盘(15:31:55)。**PIE 手滚验收待用户** —— 原因见 §47.3。
+
+### 47.1 设计决定(为什么不是一条新的缩放通道)
+
+- **滚轮直接复用 Q/E 的调距路径**:新增 `StepCameraDistance(Fraction)` 把 Q/E 原来各自内联的
+  "有轨相机 → `AdjustTrailDistance`(轨距) / 无轨相机 → `AdjustCameraDistance`(弹簧臂长 220–900cm)"
+  分支收进一个函数,滚轮和 Q/E 都调它。→ 玩家调距**只有一套行为、一套 clamp、一处参数**,
+  以后改手感不用改两遍(改的动机就是"不想让滚轮和 Q/E 分离成两套距离状态")。
+- **一格滚轮 = 一次 Q/E 步进**(`CameraDistanceStepCm = 60`)。传进去的是 `Clamp(Δ, −1, +1)`:
+  普通鼠标 Δ=±1 → 正好一步;高分辨率/惯性滚轮的小数增量 → 按比例走(0.33 → 1/3 步);
+  猛滚一帧最多一格,和 Q/E 的"按键即一格"手感一致。
+- **没加任何新参数/新开关**。也没做 FOV 变焦:用户说的"缩放"按 Q/E 已有语义落成"相机拉远拉近";
+  若之后要的是**视野变焦**(FOV),`UpdateAiming()` 里那条 `AimTargetFOV` 插值链可直接借。
+
+### 47.2 改动清单(文件级)
+
+| 文件 | 改动 |
+|---|---|
+| `Private/GSRollingBallPawn.cpp` | ① `PollNativeInput()` 新增滚轮轮询(在 Q/E 之后);② Q/E 两个分支改为调 `StepCameraDistance(±1)`;③ 新增 `StepCameraDistance()` 实现;④ `[GSCamMouse]` 调试日志加 `wheel=%.2f` |
+| `Public/GSRollingBallPawn.h` | 声明 `void StepCameraDistance(float Fraction);` |
+| `Private/GSFramework.cpp` | 调试 HUD 控制提示:`Q/E camera dist` → `Q/E or wheel camera dist` |
+
+核心代码(`PollNativeInput`,接在 Q/E 之后):
+
+```cpp
+// 鼠标滚轮缩放:一格 = 一次 Q/E 步进。GetInputAnalogKeyState 只在本帧真有滚轮事件时
+// 非零(PlayerInput 每帧把累加器刷进 RawValue 后清零),所以不需要边沿标记;
+// 夹到 ±1:高分辨率滚轮的小数增量按比例走,猛滚也每帧最多一格,和 Q/E 手感一致。
+const float WheelDelta = PC->GetInputAnalogKeyState(EKeys::MouseWheelAxis);
+if (!FMath::IsNearlyZero(WheelDelta))
+{
+    StepCameraDistance(FMath::Clamp(WheelDelta, -1.0f, 1.0f));
+}
+```
+
+### 47.3 为什么可以轮询滚轮(这是不会过期的引擎知识,下次别再重新查)
+
+本项目所有输入都是 tick 里 `IsInputKeyDown` 原生轮询(理由见 `SetupPlayerInputComponent` 注释:
+本工程给关卡实例 BindAction 会丢 InputComponent)。滚轮没有"按下/抬起",只能读轴,于是
+"`PC->GetInputAnalogKeyState(EKeys::MouseWheelAxis)` 会不会一直返回同一个值、导致一滚就持续缩放"
+是唯一要确认的点。**读 UE5.8 源码确认不会**,链路:
+
+1. `FSceneViewport` 把滚轮当轴事件发:`ClientPtr->InputAxis(..., EKeys::MouseWheelAxis, WheelDelta, ...)`
+   (`Engine/Private/Slate/SceneViewport.cpp:968`)。
+2. `UPlayerInput::InputAxis` 对模拟轴做**累加**:`KeyState.RawValueAccumulator.X += AmountDepressed`
+   (`PlayerInput.cpp:332`);`GetKeyValue` 读的是 `RawValue.X`(`PlayerInput.cpp:2210`)。
+3. `EvaluateKeyMapState`(`ProcessInputStack` 末尾)**每帧**对 `ShouldUpdateAxisWithoutSamples()` 的键
+   把累加器刷进 `RawValue`,然后**把累加器清零**(`PlayerInput.cpp:1345 / 1394`)。
+4. `EKeys::MouseWheelAxis` 带 `FKeyDetails::UpdateAxisWithoutSamples` 标志
+   (`InputCore/Private/InputCoreTypes.cpp:538`),所以**每帧都会被刷**——没有滚轮事件的那一帧
+   `RawValue` 被刷成 0。
+5. `ProcessPlayerInput` → `ProcessInputStack` 在 `APlayerController::PlayerTick` 里**每帧无条件调用**
+   (`PlayerController.cpp:5494`)。
+
+→ 结论:读出来就是"本帧滚轮增量",语义等同 `GetInputMouseDelta`,**不需要自己存上次值做边沿判定**。
+(同样的道理适用于 MouseX/MouseY,它们也是这个标志。)
+
+### 47.4 验证状态
+
+| 项 | 状态 |
+|---|---|
+| 编译 | ✅ UBT `-NoUBA` Result: Succeeded;两次dll落盘时间 15:31:55 / 15:33 前后,**是磁盘 dll 不是 Live Coding 补丁**(编辑当时未开,`Get-Process *Unreal*` 为空) |
+| 引擎语义 | ✅ 逐层读源码确认(§47.3) |
+| PIE 手滚 | ⏳ **待用户**。本机 PIE 收不到注入的鼠标事件(UE 走 raw input,注入被忽略,§35 已记录),滚轮没法脚本化验证 → 只能人工滚一下 |
+| 滚轮不灵怎么查 | 打开 Pawn 的 `bFallbackCamDebugLog=true`,日志每 0.4s 打一行 `[GSCamMouse] ... wheel=%.2f`。`wheel` 恒为 0 = 引擎没把滚轮事件送到 PC(输入模式/焦点问题);`wheel` 有值但相机不动 = 缩放链路问题(这时看 `CameraArm->TargetArmLength`) |
+
+### 47.5 已知边界(全部与 Q/E 完全一致,不是本轮新引入)
+
+- **按住右键瞄准中**:`UpdateAiming()` 每帧把 `TargetArmLength` 往 `AimArmLengthCm` 插值,
+  所以滚轮(和 Q/E)当帧就被覆盖;松手后回到 `NonAimArmLengthCm` 基线。想在瞄准态也调距,
+  得先让瞄准态不接管 `TargetArmLength`,那是另一个改动。
+- **屏幕出提示/锁输入时**(`bInputLocked`,如拾取物品后的"空格继续"):`PollNativeInput` 整体不跑,
+  滚轮和 Q/E 一起失效。
+- **灵敏度倍率不参与**:`MouseSensitivityMultiplier` 是视角灵敏度,缩放不吃它(和 Q/E 一样)。
+- 关卡里的设置菜单(`GSMenuGameMode`)是另一套 pawn/UI,本轮没碰,未发现滚轮冲突。
+
+### 47.6 参数表(本轮零新增,全是复用)
+
+| 参数 | 位置 | 默认 | 作用 |
+|---|---|---|---|
+| `CameraDistanceStepCm` | Pawn\|Camera | 60 | **一格滚轮 / 一次 Q/E** 的臂长步长(滚轮与 Q/E 共用) |
+| `AdjustCameraDistance` 内联 clamp | `GSRollingBallPawn.cpp` | 220 ~ 900 | 无轨相机臂长范围 |
+| `TrailAdjustStepCm` / `TrailMinCm` / `TrailMaxCm` | Rail Camera 组件 | (见 §12) | 有轨相机的轨距步长/范围(滚轮同样驱动) |
+| `bFallbackCamDebugLog` | Pawn\|Debug | false | 打开后日志里看 `wheel=` |
+
+> 若用户反馈"滚一格跳太多":**别改 `CameraDistanceStepCm`**(那会一起改掉 Q/E 手感),
+> 给滚轮单开一个 `CameraWheelStepCm` 并在 `StepCameraDistance` 里分流——本轮没加,因为还没这个需求。
+
+### 47.7 合入三步(队友侧照做)
+
+1. `pull` 本轮源码 → **关编辑器** → 重编。校验 `Plugins/GravityShift/Binaries/Win64/UnrealEditor-GravityShift.dll`
+   比源码新(本项目出过多次"源码是新的、dll 是旧的"事故,§26)。
+2. **关卡不用拉、不用改**(本轮一个 `.umap` 都没动)。
+3. PIE 验收:滚轮上下各滚几格 → 相机应一格格拉远/拉近;滚到底/到顶后不再动(clamp);
+   按住右键瞄准时滚轮无反应(预期);松开右键回到滚轮设的距离(Q/E 同)。
+
+### 47.8 给下一个 AI
+
+- 这类"加一个输入 → 动相机"的小需求,先看 **Q/E 是怎么做的**,99% 是接同一条路径,别另起一套状态。
+- 本项目加输入**不要**用 `BindAxis`/输入映射(会丢 InputComponent),统一在 `PollNativeInput()` 里轮询;
+  轴类输入用 `PC->GetInputAnalogKeyState(轴键)`,已确认是"本帧增量"语义(§47.3)。
+- 本机**没法脚本化验证鼠标输入**(PIE 收不到注入事件)。凡是输入相关改动,交付时都要写清
+  "人工验收步骤 + 一个能自证的调试开关",别声称"已 PIE 验证"。
+
+### 47.9 当天修正:滚轮/Q/E 调距**本来是死的**(用户实测反馈后挖出的根因)
+
+> 用户反馈原话:"编译代码了吗?我没法用滚轮控制缩放"。编译是过了(§47.4),**但编译过 ≠ 有用** ——
+> 我复用 Q/E 那条路时只核对了"引擎的滚轮语义"(§47.3),**没核对 Q/E 这条路今天是不是还活着**。它不活。
+
+**根因两层,叠在一起:**
+
+1. **`StepCameraDistance` 的 `if (RailCamera)` 恒真。** `RailCamera` 是构造期
+   `CreateDefaultSubobject` 出来的(`GSRollingBallPawn.cpp:110`),**指针永远非空**。而 §27 起导轨相机退场,
+   关卡里没有导轨 → `ComputeCameraPose()` 里 `SelectRail()` 返回 null 直接 `return false`(`bActive=false`)。
+   于是无轨模式下每一格滚轮都被写进 `RailCamera->TrailDistanceCm` —— 一个**没人读**的值。
+2. **`AdjustCameraDistance` 写错了对象(这条是 Q/E 自己的老 bug)。** 无轨相机**实际**的取景臂长读的是
+   属性 **`CameraArmLengthCm`** —— `UpdateCamera()` 用它算探针期望位
+   (`DesiredCamPos = PivotLoc + ArmDir * CameraArmLengthCm`,`GSRollingBallPawn.cpp:887`),而弹簧臂的
+   `TargetArmLength` 在同一帧末尾被**无条件覆写**成探针结果 `SmoothedArmLengthCm`(第 931 行)。
+   老代码写的是 `CameraArm->TargetArmLength` → **当帧就被覆盖,等于白写**;
+   连它顺手存的 `NonAimArmLengthCm` 也只喂给一处随后被覆盖的插值(第 1823 行)。
+   → **结论:Q/E 调距从"切到无轨相机"(§27,2026-09-12)那天起就一直是死的**,滚轮只是原样继承了这条路。
+   (旁证:§12 的"Q/E 玩家调距 PIE 验证通过"是有轨相机时代的事。)
+
+**修法(2 处):**
+
+| # | 位置 | 改成 |
+|---|---|---|
+| 1 | `StepCameraDistance` | `if (RailCamera && RailCamera->IsDriving())` —— 判"轨相机是否**正在驱动画面**",与 `UpdateCamera`/`UpdateAiming` 的取景分支同一条件(第 814/1584/1811 行都是这么判的) |
+| 2 | `AdjustCameraDistance` | 改 `CameraArmLengthCm`(clamp 220~900 不变),而不是 `CameraArm->TargetArmLength`;参数名 `DirectionSign→Fraction`(滚轮会传小数) |
+
+**已知未修(同一条死链上的另一个受害者,属另一个需求)**:按住右键的**臂长拉近**(`AimArmLengthCm=250`)
+也写 `TargetArmLength`,所以同样被覆写 —— 瞄准现在实际生效的是 **FOV 收窄 + 越肩偏移**,臂长没贴过去。
+代码注释(第 1808-1810 行)早已把这个现象记成"设计行为",本轮不动它:改它=改瞄准手感,得单独验收。
+
+**教训(写进本文档的定式)**:复用一条既有路径之前,先确认**那条路径今天还活着** ——
+"参照 Q/E 的做法"本身没错,错在没验证 Q/E 还在工作。核对"输入到引擎"和核对"这条链路到画面"是两件事,
+本次只做了前者。
+
+### 47.10 同日续:滚轮**方向反转** + **调距平滑层**(用户反馈后实施)
+
+> 用户实测反馈两条:"滚轮方向反了"、"手感差"。**这条反馈本身是 §47.9 修复生效的证据** ——
+> 在 §47.9 之前滚轮是死的,根本滚不出方向问题。
+
+**改了什么(源码 2 文件):**
+
+| # | 位置 | 改动 |
+|---|---|---|
+| 1 | `PollNativeInput()` 滚轮块(约 :1650) | `StepCameraDistance(FMath::Clamp(...))` → **`StepCameraDistance(-FMath::Clamp(...))`**。⚠ **只翻这一处**:Windows 惯例如前滚(远离自己)= 正 Δ,而玩家期望前滚 = 拉近;`AdjustCameraDistance` 内部**不翻**,否则 Q=近 / E=远 的既有约定会跟着反 |
+| 2 | `AdjustCameraDistance()` | 不再直接写 `CameraArmLengthCm`,改写**期望臂长** `ZoomDesiredArmCm`(clamp 220~900 不变);`NonAimArmLengthCm` 同步跟这个期望值 |
+| 3 | `UpdateCamera()`,探针块**之前**(约 :884) | 新增平滑层:每帧 `CameraArmLengthCm = FInterpTo(CameraArmLengthCm, ZoomDesiredArmCm, DeltaSeconds, CameraZoomInterpSpeed)`,速度为 0 时直接赋值(= 退回旧手感)。此行**在探针链之前**,探针当帧读到的就是平滑后的值 |
+| 4 | `ApplyBallProfile()`(约 :237) | 换 profile 直接改臂长,**平滑目标必须跟着走**,否则下一帧会被平滑层拽回旧距离(不写这行=换 profile 后距离被弹回) |
+
+**新增参数(1 个,`GravityShift|Camera`):**
+
+- **`CameraZoomInterpSpeed = 10.0`**(`EditAnywhere, BlueprintReadWrite, ClampMin 0`)——
+  调距平滑速度,**越大越快到位,0 = 关闭平滑(完全退回"拉近瞬跳"的旧手感)**。
+  参考值:10 ≈ 0.1s 走完 63%、0.3s 走完 95%;想更"跟手"给 15~20,想更"电影感"给 4~6。
+- **`CameraDistanceStepCm` 建议从 60 调到 40**(本来就可编辑,零代码):滚一格 60cm 在 220~900 范围内
+  只有 11 格,偏粗;40 更细腻。仍嫌粗再考虑"按当前臂长比例步进"(方案 C,本轮**没做**)。
+
+**为什么这层平滑是安全的(关键设计):**
+
+平滑只作用在**目标**上,`UpdateCamera()` 的探针链(`SafeArmCm` / `SmoothedArmLengthCm` /
+`ArmExtendHoldSeconds` / `ArmLengthInterpSpeed`)**一字未动**:
+- **拉近**:`SafeArmCm` 跟着平滑目标一起下降 → `SafeArmCm < SmoothedArmLengthCm` 恒成立 →
+  每帧 snap 到平滑目标 → 画面平滑(旧行为是立即压入 = 瞬跳一个步长)。
+- **撞障碍**:`SafeArmCm`(探针距离)仍小于目标 → "命中立即压入"的防穿模**照旧生效**,不受平滑影响。
+- 平滑层独占写 `CameraArmLengthCm`:除构造/BeginPlay 初始化和 `ApplyBallProfile` 外,没有别的代码写它。
+
+**已知限制(本轮明确不处理,续做前先读):**
+
+1. **拉远的有效速度仍受探针的 `ArmLengthInterpSpeed = 5` 拖累** —— 目标按 10 走,探针链按 5 追,
+   所以"拉近"比"拉远"跟得紧。两向都平滑了,但**不完全对称**。要真正对称得像 §47.10 的 A+ 方案那样
+   改探针放长条件(属"改探针既有逻辑",本轮未批准)。
+2. **贴墙后往远滚仍可能先卡 `ArmExtendHoldSeconds = 0.7s`**(去弹驻留,既有行为,用户明确不要求消除)。
+3. **ADS(按住右键)期间的臂长拉近仍是死的**(§47.9 记录的另一个受害者,改它=改瞄准手感,要单独验收);
+   瞄准时滚轮**仍无效**(`UpdateAiming` 的臂长分支与调距互不干涉,这是既有预期行为)。
+4. `CameraZoomInterpSpeed = 0` 时回到"离散瞬跳"——拉近瞬跳、拉远被探针拖慢,**这就是改动前的旧手感**。
+
+**验收步骤(PIE,人工):**
+
+1. 先看 HUD 顶行 `GS build <日期> <时间>` 比本次编译新(本项目出过多次"源码新、dll 旧",§26)。
+2. **滚轮向前 → 相机拉近;向后 → 拉远**(与手感直觉一致);拉近拉远都应**平滑滑过去,无瞬跳**。
+3. Q/E 调距应同样平滑(Q=近 / E=远 方向**不变**)。
+4. 贴在墙边/楼梯口往远滚:先有约 0.7s 驻留再放长(预期)。
+5. 滚到两端不再动(clamp 220~900)。
+6. 按住右键瞄准时滚轮无反应(预期);松开后回到滚轮设的距离。
+7. 若"手感"仍不对:先调 `CameraZoomInterpSpeed`,再调 `CameraDistanceStepCm`,**都不需要重编译**(都是
+   `EditAnywhere`,关卡实例上直接改即可)。
+8. 方向若还是反的(滚轮符号在个别驱动/系统"自然滚动"下可能相反):`PollNativeInput()` 里那个负号去掉即可,
+   一行改动。
+
+**产物校验**:`Plugins/GravityShift/Binaries/Win64/UnrealEditor-GravityShift.dll` 时间戳 **2026-09-17 15:58:58**,
+UBT `Result: Succeeded`(27.08s)。本轮**未动任何 `.umap`**。

@@ -235,6 +235,8 @@ void AGSRollingBallPawn::ApplyBallProfile(UGSBallProfile* NewProfile)
 	CameraFlipDurationSeconds = NewProfile->CameraFlipDurationSeconds;
 	CameraFollowInterpSpeed = NewProfile->CameraFollowInterpSpeed;
 	CameraArmLengthCm = NewProfile->CameraArmLengthCm;
+	// 换 profile 直接改臂长:平滑目标必须跟着走,否则下一帧被调距平滑层拽回旧距离。
+	ZoomDesiredArmCm = CameraArmLengthCm;
 	CameraYawDegreesPerMouseUnit = NewProfile->CameraYawDegreesPerMouseUnit;
 	CameraPitchDegreesPerMouseUnit = NewProfile->CameraPitchDegreesPerMouseUnit;
 	MaximumCameraPitchDegrees = NewProfile->MaximumCameraPitchDegrees;
@@ -881,6 +883,19 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 	// AimPitchDeg 瞄准俯仰微调;旧实现用 CurrentCameraRotation,视线偏最多 ~17°,
 	// 探针判"安全"时相机实际已进墙);②球扫掠替代单线 + 命中立即压入替代 8/s 平滑
 	// 收短(平滑期间相机停在墙里的那几帧就是穿模)。
+	// —— 调距平滑(Q/E / 滚轮):把"期望臂长"平滑成运动,再交给下面的探针链 ——
+	// 放在探针之前是有意的:探针读的就是 CameraArmLengthCm(下一行),平滑值当帧生效。
+	// ⚠ 探针链本身一字未动:拉近时 SafeArmCm 跟着平滑目标一起下降,`SafeArmCm <
+	// SmoothedArmLengthCm` 恒成立 → 每帧 snap 到平滑目标,画面是平滑的;撞上障碍时
+	// SafeArmCm(探针距离)仍小于目标,"命中立即压入"的防穿模照旧生效。
+	if (ZoomDesiredArmCm < 0.0f)
+	{
+		ZoomDesiredArmCm = CameraArmLengthCm;
+	}
+	CameraArmLengthCm = (CameraZoomInterpSpeed > 0.0f)
+		? FMath::FInterpTo(CameraArmLengthCm, ZoomDesiredArmCm, DeltaSeconds, CameraZoomInterpSpeed)
+		: ZoomDesiredArmCm;
+
 	const FVector PivotLoc = CameraPivot->GetComponentLocation();
 	const FQuat ProbeRotation = BuildCameraRotation(TargetCameraUp, LastAimPitchDeg);
 	const FVector ArmDir = -ProbeRotation.GetForwardVector();
@@ -1573,8 +1588,8 @@ void AGSRollingBallPawn::PollNativeInput()
 		if (NowT >= GSCamMouseLogNextTime)
 		{
 			GSCamMouseLogNextTime = NowT + 0.4;
-			UE_LOG(LogTemp, Log, TEXT("[GSCamMouse] t=%.2f mouse=(%.2f,%.2f) polling=%d sensMult=%.2f yawScale=%.3f pitchScale=%.3f sensScale=%.2f"),
-				NowT, MouseX, MouseY, bEnableNativePollingInput ? 1 : 0, MouseSensitivityMultiplier,
+			UE_LOG(LogTemp, Log, TEXT("[GSCamMouse] t=%.2f mouse=(%.2f,%.2f) wheel=%.2f polling=%d sensMult=%.2f yawScale=%.3f pitchScale=%.3f sensScale=%.2f"),
+				NowT, MouseX, MouseY, PC->GetInputAnalogKeyState(EKeys::MouseWheelAxis), bEnableNativePollingInput ? 1 : 0, MouseSensitivityMultiplier,
 				CameraYawDegreesPerMouseUnit, CameraPitchDegreesPerMouseUnit,
 				(Camera && DefaultCameraFOV > 1.0f) ? FMath::Sqrt(Camera->FieldOfView / DefaultCameraFOV) : -1.0f);
 		}
@@ -1633,30 +1648,27 @@ void AGSRollingBallPawn::PollNativeInput()
 	const bool bTrailCloserDown = PC->IsInputKeyDown(TrailCloserKey);
 	if (bTrailCloserDown && !bTrailCloserKeyWasDown)
 	{
-		if (RailCamera)
-		{
-			RailCamera->AdjustTrailDistance(-1.0f);
-		}
-		else
-		{
-			AdjustCameraDistance(-1.0f);
-		}
+		StepCameraDistance(-1.0f);
 	}
 	bTrailCloserKeyWasDown = bTrailCloserDown;
 
 	const bool bTrailFartherDown = PC->IsInputKeyDown(TrailFartherKey);
 	if (bTrailFartherDown && !bTrailFartherKeyWasDown)
 	{
-		if (RailCamera)
-		{
-			RailCamera->AdjustTrailDistance(1.0f);
-		}
-		else
-		{
-			AdjustCameraDistance(1.0f);
-		}
+		StepCameraDistance(1.0f);
 	}
 	bTrailFartherKeyWasDown = bTrailFartherDown;
+
+	// 鼠标滚轮缩放:一格 = 一次 Q/E 步进。GetInputAnalogKeyState 只在本帧真有滚轮事件时
+	// 非零(PlayerInput 每帧把累加器刷进 RawValue 后清零),所以不需要边沿标记;
+	// 夹到 ±1:高分辨率滚轮的小数增量按比例走,猛滚也每帧最多一格,和 Q/E 手感一致。
+	// ⚠ 取负:Windows 惯例"前滚(远离自己)"= 正 Δ,而玩家期望前滚 = 拉近(臂变短),
+	// 所以滚轮在**这里**翻号——只翻这一处,Q/E 的 Q=近 / E=远 约定不动(2026-09-17 用户反馈)。
+	const float WheelDelta = PC->GetInputAnalogKeyState(EKeys::MouseWheelAxis);
+	if (!FMath::IsNearlyZero(WheelDelta))
+	{
+		StepCameraDistance(-FMath::Clamp(WheelDelta, -1.0f, 1.0f));
+	}
 
 	// Player speed keys: each press steps the WASD drive force (O down, P up).
 	const bool bSpeedDownDown = PC->IsInputKeyDown(SpeedDownKey);
@@ -1885,19 +1897,40 @@ void AGSRollingBallPawn::UpdateAiming()
 	bAimFireKeyWasDown = bFireDown;
 }
 
-void AGSRollingBallPawn::AdjustCameraDistance(float DirectionSign)
+void AGSRollingBallPawn::StepCameraDistance(float Fraction)
 {
-	if (!CameraArm)
+	// Q/E 与鼠标滚轮共用的调距入口(Fraction 可为小数)。
+	// ⚠ 分流必须看"轨相机是不是**正在驱动画面**",不能只看指针是否非空:RailCamera 是构造期
+	// CreateDefaultSubobject 出来的、永远非空(§47.9 踩过)。写成 if (RailCamera) 时,无轨相机
+	// 模式下会把调距写进没人读的 TrailDistanceCm(关卡里没导轨/球不在导轨区 → ComputeCameraPose
+	// 直接 return false,轨相机根本不驱动),表现为"按了没反应"。
+	if (RailCamera && RailCamera->IsDriving())
 	{
-		return;
+		RailCamera->AdjustTrailDistance(Fraction);
 	}
-	// 与 Q/E 同一套步长;弹簧臂长变化经相机平滑链生效,不跳变。
-	CameraArm->TargetArmLength = FMath::Clamp(
-		CameraArm->TargetArmLength + DirectionSign * CameraDistanceStepCm, 220.0f, 900.0f);
-	// 非瞄准态下 Q/E 的改动就是新的"恢复基线"。
+	else
+	{
+		AdjustCameraDistance(Fraction);
+	}
+}
+
+void AGSRollingBallPawn::AdjustCameraDistance(float Fraction)
+{
+	// ⚠ 无轨相机**实际**读的臂长是属性 CameraArmLengthCm(UpdateCamera 用它算探针期望位
+	// DesiredCamPos),**不是**弹簧臂的 TargetArmLength——后者每帧被 UpdateCamera 末尾
+	// 写成 SmoothedArmLengthCm(探针结果),写它当帧就被覆盖,等于白写(§47.9 根因)。
+	// 调距直接改 CameraArmLengthCm 是"瞬跳"手感(拉远被探针的放长平滑拖慢、拉近立即压入),
+	// 所以改成写**期望臂长** ZoomDesiredArmCm,由 UpdateCamera 开头的平滑层追上来。
+	if (ZoomDesiredArmCm < 0.0f)
+	{
+		ZoomDesiredArmCm = CameraArmLengthCm;
+	}
+	ZoomDesiredArmCm = FMath::Clamp(ZoomDesiredArmCm + Fraction * CameraDistanceStepCm,
+		220.0f, 900.0f);
+	// 非瞄准态下的改动就是新的"瞄准解除恢复基线"(瞄准态不覆盖玩家的距离选择)。
 	if (!bAiming)
 	{
-		NonAimArmLengthCm = CameraArm->TargetArmLength;
+		NonAimArmLengthCm = ZoomDesiredArmCm;
 	}
 }
 

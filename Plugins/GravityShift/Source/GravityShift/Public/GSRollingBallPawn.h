@@ -199,9 +199,15 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "GravityShift|Input")
 	TObjectPtr<AGSBlockBase> AimedBlock = nullptr;
 
-	// 无导轨相机的 Q/E 调距:每按一次的步长与范围(clamp)。
+	// 无导轨相机的 Q/E / 滚轮调距:每按一次(滚一格)的步长。范围 220~900 见 AdjustCameraDistance。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "10.0"))
 	float CameraDistanceStepCm = 60.0f;
+
+	// 调距的平滑速度(越大越快到位)。调距写的是"期望臂长",UpdateCamera 每帧把
+	// CameraArmLengthCm 朝它插值 → 拉近不再瞬跳(旧行为:探针立即压入,往近滚一格画面
+	// 就"啪"地跳一个 CameraDistanceStepCm)。0 = 关闭平滑(退回瞬跳的旧手感)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Camera", meta = (ClampMin = "0.0"))
+	float CameraZoomInterpSpeed = 10.0f;
 
 	// —— 瞄准聚焦(TPS ADS 手感,2026-09-12) ——
 	// 瞄准时相机 FOV 收到这个值(越小越"聚焦")。
@@ -797,6 +803,10 @@ protected:
 	float AxisHintExpireTime = -1.0f;
 	FString AxisHintText;
 
+	// 调距的**期望**臂长(平滑目标,由 Q/E / 滚轮写)。<0 = 未初始化,首次使用时取当前
+	// CameraArmLengthCm 再开始插值。
+	float ZoomDesiredArmCm = -1.0f;
+
 	// ADS 状态:非瞄准时的臂长基线(Q/E 改动实时反映进来)与开局 FOV 基线。
 	float NonAimArmLengthCm = 0.0f;
 	float DefaultCameraFOV = 0.0f;
@@ -816,8 +826,12 @@ protected:
 	void PollNativeInput();
 	// 新瞄准机制:每 tick 更新 RMB 瞄准状态/中心射线/高亮切换;锁定时左键翻转方块重力。
 	void UpdateAiming();
-	// 无导轨相机的 Q/E 调距(有轨相机时 Q/E 仍走轨相机,不进这里)。
-	void AdjustCameraDistance(float DirectionSign);
+	// 无导轨相机的 Q/E / 滚轮调距:写的是期望臂长 ZoomDesiredArmCm(无轨取景的实际臂长源
+	// 是 CameraArmLengthCm,由 UpdateCamera 的平滑层追上来),不是弹簧臂的 TargetArmLength
+	// ——后者每帧被探针覆写(Fraction 可为小数,滚轮会传小数)。
+	void AdjustCameraDistance(float Fraction);
+	// Q/E 与鼠标滚轮共用的调距入口:轨相机在驱动→调轨距,否则调无轨臂长。
+	void StepCameraDistance(float Fraction);
 	void ShowAxisDisabledHint(EGSGravityAxis Axis);
 	AActor* FindBestInteractable() const;
 
