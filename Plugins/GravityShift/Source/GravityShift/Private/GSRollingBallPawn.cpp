@@ -1524,6 +1524,19 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 		Right = FVector::CrossProduct(Up, Forward);
 	}
 	FVector Desired = Forward * MoveInput.Y + Right * MoveInput.X;
+	// 重力不在世界 -Z 时整段换成世界参考系(2026-09-22 用户定则):
+	//   W/S = 世界 ±Z(上爬/下爬),A/D = 同时垂直于重力方向与世界 Z 的水平方向
+	//   (= Cross(Z, 重力方向),相机看向支撑面时的屏幕右;重力 -X 时 A/D = ∓Y)。
+	// 重力正好 -Z 时不生效,照旧走上面的相机相对基;重力正好 +Z(球在天花板)时
+	//   A/D 无解(重力与 Z 平行,叉乘为零),整段退掉,也走相机相对基。
+	if (FVector::DotProduct(GravityDir, FVector(0.0, 0.0, -1.0)) < 0.999f)
+	{
+		const FVector WorldRight = FVector::CrossProduct(FVector(0.0, 0.0, 1.0), GravityDir).GetSafeNormal();
+		if (!WorldRight.IsNearlyZero())
+		{
+			Desired = FVector(0.0, 0.0, 1.0) * MoveInput.Y + WorldRight * MoveInput.X;
+		}
+	}
 	// Debug:世界方向强制驱动(验证场景机制用;零向量 = 不介入,见头文件说明)。
 	if (!DebugAutoDriveWorldDir.IsNearlyZero())
 	{

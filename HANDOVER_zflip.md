@@ -2190,3 +2190,174 @@ if (!FMath::IsNearlyZero(WheelDelta))
 
 **产物校验**:`Plugins/GravityShift/Binaries/Win64/UnrealEditor-GravityShift.dll` 时间戳 **2026-09-17 15:58:58**,
 UBT `Result: Succeeded`(27.08s)。本轮**未动任何 `.umap`**。
+
+---
+
+## 48. 2026-09-22 第三十五轮(用户侧 AI):世界轴定则落地(Re_Blockout 方块重力 + 16 个转向器)+ 非竖重力下 WASD 改世界参考系
+
+### 48.1 需求(用户原话要点)
+
+1. 把 `SM_LDI_GravityAffected3` / `SM_LDI_GravityAffected7` 的初始重力方向调整至 **z 轴正向**。
+   ⚠ 用户对 `Affected7` 写了两条冲突指令(先 z 正向、后 x 正向)。**已询问,用户选"世界 +Z,忽略最后一条"**。
+2. 把 `SM_LDI_GravityAffected8` 的初始重力方向调整至 **x 轴正向**。
+3. 给 `LDI_Gravityshift` 的 **1,2,3,4,5,6,7,8,9,11,12,13,14,15,16** 都加上转向器代码。
+4. `SM_LDI_GravityAffected8` 要"能碰到小球,但不会被小球撞动"(用户原话是"把对球的碰撞关掉",但**关碰撞在 UE 里两侧不产生接触 = 球会穿过去**,与诉求相反,故改用质量方案)。
+5. 小球重力**不朝世界 −Z** 时:**S → 世界 −Z、W → 世界 +Z、A/D → 垂直于当前重力方向 且 垂直于世界 Z 轴**;
+   重力朝世界 −Z 时保持原手感。
+
+**关键约定(用户 2026-09-22 明确):讲方块重力方向时说的轴一律是【世界轴】。**
+→ 本仓库此前"方块按自身局部轴理解"的说法**作废**(旧记忆已改正)。
+
+### 48.2 关卡改动(`Content/Maps/Re_Blockout.umap`,全部已 `save_current_level` 并回读校验)
+
+**方块初始重力(数值为回读验算出的世界方向):**
+
+| actor | 类 | 旋转 | `GravityAxisLocal` | `bGravityRises` | 世界重力 |
+|---|---|---|---|---|---|
+| `SM_LDI_GravityAffected5` | `BP_GSBlockBase_C` | P0 Y180 R180 | (0,0,0) | true | **+Z** |
+| `SM_LDI_GravityAffected3` | 〃 | P0 Y−150 R180 | (0,0,0) | true | **+Z** |
+| `SM_LDI_GravityAffected7` | 〃 | P0 Y180 R90 | (0,0,0) | true | **+Z** |
+| `SM_LDI_GravityAffected4` | 〃 | 无 | (0,1,0) | false | **−Y** |
+| `SM_LDI_GravityAffected6` | 〃 | P−90 | (0,0,1) | false | **−X** |
+| `SM_LDI_GravityAffected8` | 〃 | 无 | (1,0,0) | true | **+X** |
+
+- ±Z 目标一律写成**零轴哨兵**(`GravityAxisLocal=(0,0,0)` + `bGravityRises`),字段干净、与 actor 旋转解耦。
+  ⚠ 上一轮为把 `Affected3` 凑成世界 −X,曾反解出 `(0.866,0.5,0)`(它 yaw−150,自身无轴对准世界 X)。
+  **本轮已改成零轴哨兵,那个"再转一下这块重力会偏 30°"的耦合隐患没了。**
+- `Affected8` 另加 **`bImmovableByPlayer = true`**(插件既有开关,零代码)。BeginPlay 时 Mesh 质量
+  40 kg → `max(40, ImmovableMassKg=2000)` = **2000 kg**;碰撞仍是 `BlockAll`,所以球照常撞上去被弹开,
+  只是推不动它。自定义重力是质量无关加速度,它自己的下落不受影响。
+  ✅ 已确认该件 `bCanBreakTargets=false`、`bBreakable=false` —— 否则抬 50× 质量会变成"拆家锤"
+  (击破能量 `0.5·m·v²` 取**撞击方**质量,见 `GSGravityBodyComponent.cpp:287/387`)。
+- ⚠ 质量与 `SetSimulatePhysics` 都在 **BeginPlay** 才应用(`GSBlockBase.cpp:207/232`),编辑器里
+  `is_simulating_physics()` 读 False 是常态,效果只在 PIE 可见。
+
+**转向器(`UGSRedirectorComponent`)共 16 个,A/B 是"世界枚举",顺序无所谓(组件按球当前重力自动判入口面):**
+
+| 实例 | A / B(集合) |
+|---|---|
+| `LDI_Gravityshift`、`LDI_Gravityshift2`(上一轮做)、`SM_LDI_Gravityshift_4`、`_13` | −Z / −X |
+| `SM_LDI_Gravityshift_1`、`_11`、`_12` | −Z / −Y |
+| `SM_LDI_Gravityshift_2`、`_14`、`_15` | −Z / +Y |
+| `SM_LDI_Gravityshift_5`、`_16` | −Z / +X |
+| `SM_LDI_Gravityshift_3`、`_9` | −X / −Y |
+| `SM_LDI_Gravityshift_6` | −X / +Y |
+| `SM_LDI_Gravityshift_7` | +X / +Y |
+| `SM_LDI_Gravityshift_8` | +X / −Y |
+
+其余参数保持默认(ride 800 / path 260 / inflate 120)。
+
+- ⚠ **命名陷阱**:`SM_LDI_Gravityshift_N`(网格资产名当 actor 标签,15 个)**与** `LDI_Gravityshift` /
+  `LDI_Gravityshift2` 是**不同 actor 实例**,只是共用同一网格资产 `SM_LDI_Gravityshift_1`。
+  关卡里**没有 `_10`** —— 用户点名的 1..9、11..16 恰好等于全部现存件。
+- 上一轮的两个转向器在此之前**没被回读校验过**,本轮已一并回读确认仍在(A/B 与表一致)。
+
+### 48.3 转向器 A/B 的批量填法(两法互校,可复用)
+
+同网格的多个实例可以一把填完,但**必须是"量"而不是"推"**:
+
+1. **网格自身口面(基准)**:`SM_LDI_Gravityshift_1` 的两个口面 = **局部 −Z 与 局部 +Y**
+   → 世界方向 = `{-u, +r}`(u=actor up、r=actor right)。在已验证的 `LDI_Gravityshift`(yaw 90)上
+   复现出既有的 `A=NEGATIVE_Z` / `B=NEGATIVE_X` ✓。
+2. **独立互校(探针)**:从包围盒中心沿世界 ±X/±Y/±Z 六向**从外向内**射,读 `impact_point` + `normal`,
+   **命中的面法线就是该口面的重力方向**。薄壳的道理:从腔体外侧射到的是口面**背面**,而
+   `EntryFaceNormal = -EntryGravity`(`GSRedirectorComponent.cpp:159`),两面法线互为相反数,
+   于是"外侧命中法线"数值上恰好 = 重力方向。
+   ⚠ 别用"绕件心六向射"判朝向,那条老坑(命中墙的背面)仍成立 —— 但**从外向内 + 正面命中**的那一发是干净的。
+3. **15/15 两法必须给同一对方向**,不一致 = 网格不是你以为的那个,**跳过别填**(本轮一个都没跳)。
+4. **为什么"按旋转映射"在这里合法**:该形状有旋转对称 —— `LDI_Gravityshift`(Y90)与
+   `LDI_Gravityshift2`(P0 Y−90 R90)旋转参数不同但**世界几何逐点一致**。重定向器只看得见世界几何,
+   所以**正确 A/B 是世界几何的函数**:几何签名相同 ⇒ A/B 必然相同。
+   (对手上只有网格资产的场景,仍需按"各网格口面不通用,必须实测"办。)
+5. 详细踩坑与算式见记忆 `gs-redirector-ab-convention`(本轮已补这一节)。
+
+### 48.4 代码改动:重力不是世界 −Z 时,WASD 换世界参考系
+
+**文件**:`Plugins/GravityShift/Source/GravityShift/Private/GSRollingBallPawn.cpp`,**`:1526-1539`**
+(`AGSBlockBase`… 实为 `AGSRollingBallPawn::ApplyMovement`,照旧在算完相机相对控制基之后):
+
+```cpp
+	FVector Desired = Forward * MoveInput.Y + Right * MoveInput.X;
+	// 重力不在世界 -Z 时整段换成世界参考系(2026-09-22 用户定则):
+	//   W/S = 世界 ±Z(上爬/下爬),A/D = 同时垂直于重力方向与世界 Z 的水平方向
+	//   (= Cross(Z, 重力方向),相机看向支撑面时的屏幕右;重力 -X 时 A/D = ∓Y)。
+	// 重力正好 -Z 时不生效,照旧走上面的相机相对基;重力正好 +Z(球在天花板)时
+	//   A/D 无解(重力与 Z 平行,叉乘为零),整段退掉,也走相机相对基。
+	if (FVector::DotProduct(GravityDir, FVector(0.0, 0.0, -1.0)) < 0.999f)
+	{
+		const FVector WorldRight = FVector::CrossProduct(FVector(0.0, 0.0, 1.0), GravityDir).GetSafeNormal();
+		if (!WorldRight.IsNearlyZero())
+		{
+			Desired = FVector(0.0, 0.0, 1.0) * MoveInput.Y + WorldRight * MoveInput.X;
+		}
+	}
+```
+
+- `GravityDir` 是 `:1433-1434` 已有的 `const FVector GravityDir = -Up;`,而 `Up = -GetActiveGravityDirection()`
+  → 即**转向器滑行过渡期间取中间方向**(`:271`),控制基全程连续。
+- **只改 `Desired` 的方向来源**,后面 `Desired.Normalize()` → `AddForce`(`:1545` 贴地 / `:1549` 空控)、
+  瞄准减速、限速等环节一字未动。**§44/§47 的相机相对自适应基仍原样保留**(重力 −Z 时走它)。
+
+| 重力(世界) | W / S | D(→) / A(←) |
+|---|---|---|
+| −Z | 原行为(相机相对自适应基) | 原行为 |
+| −X | +Z / −Z | −Y / +Y |
+| +X | +Z / −Z | +Y / −Y |
+| −Y | +Z / −Z | +X / −X |
+| +Y | +Z / −Z | −X / +X |
+| +Z(天花板) | +Z / −Z | 退化 → 回相机相对基 |
+
+### 48.5 ★★★ 产物状态(接手先看这条)★★★
+
+**源码新、dll 旧**(§26 的老坑,本轮又踩了一次):
+
+- `GSRollingBallPawn.cpp` 改了,但**只经 Live Coding 打补丁到当时运行中的编辑器进程**:
+  `Saved/Logs/z-flip.log:4817` 与 `:4993` 两条 `LogLiveCoding: Display: Live coding succeeded`。
+- 磁盘 `Plugins/GravityShift/Binaries/Win64/UnrealEditor-GravityShift.dll` 时间戳仍是
+  **2026-09-17 15:58**(1109504 字节)—— **Live Coding 不落盘,关掉编辑器再开这个改动就没了**。
+- ⇒ 接手人**必须关编辑器重编**(增量约 11 秒,target `ZFlipEditor`)才能让改动持久;
+  HUD 顶行 `GS build <日期>` 在重编前**不会**变成本轮日期,**不能**拿它当"改动已生效"的证据
+  (本轮期间 PIE 里生效的是 Live Coding 补丁)。
+- git 状态:`M Content/Maps/Re_Blockout.umap`、`M Plugins/GravityShift/Source/GravityShift/Private/GSRollingBallPawn.cpp`,
+  **均未 commit**;HEAD = `64a82e9 关卡流送系统`。
+- 本轮操作通道:MCP HTTP `:8000` 没起,走**组播兜底** `python ue_pyexec.py "$(cat 脚本.py)"`
+  (skill `ue-nocode` 的 `reference/ue_pyexec.py`);`.umap` 改完全部 `save_current_level()` 并回读校验。
+
+### 48.6 未验证项 / 已知限制(如实声明)
+
+1. **16 个转向器一个都没跑 PIE**。几何口面是量出来的,但触发还要过运行时门:align(球当前重力与 A 或 B
+   夹角 <60°,`EntryFaceGravityMin=0.5`)、最低速度、lip 净空、`TriggerBounds` 等。
+2. **`SM_LDI_Gravityshift_3/6/7/8/9` 的两个口面都在水平面内**(配对里没有 ±Z)。球按常规 ±Z 重力到那里时
+   **align 门必挂**,只有该处球重力是水平方向时才可能触发。若设计上这几件本该竖着用,要复核其旋转或配对。
+3. **新的世界参考系 WASD 没跑 PIE**。A/D 的正负是按"相机沿重力方向看向支撑面时的屏幕右"定的
+   (`D = Cross(Z, 重力)`);用户只规定了轴、没规定方向。若左右反了:把叉乘顺序换成 `Cross(GravityDir, Z)`(一行)。
+4. **重力正好 +Z(球贴天花板)时 A/D 无解** → 整段退掉走旧相机相对基;此状态 W=顶住天花板、S=把球推离
+   (字面实现,**没做支撑面投影**)。若要"贴着天花板滑",需把方向投到支撑面(投影掉 `Up` 分量)。
+5. 新逻辑只覆盖 `MoveInput` → `AddForce` 这条驱动路径;`bClampPlanarSpeed`、`AimDriveScale`、无输入刹车等
+   未动。松开按键的刹车仍按重力方向(`:1414-1421`),与世界参考系的 W/S 无关。
+6. 旧文档/记忆里"方块重力方向按自身轴理解"的说法**作废**(见 §48.1 的世界轴约定)。
+
+### 48.7 验收步骤(PIE,人工)
+
+1. **先重编**(见 §48.5),再看 HUD `GS build` 日期是否更新 —— 本轮不重编就测,只能依赖 Live Coding 那次补丁。
+2. **Affected8 推不动**:球撞上去能接触、能被弹开,但它几乎不产生位移(质量 2000 kg);
+   把该处重力翻到 +X 后,它照常跟着重力走。
+3. **Affected3 / 7 重力**:进该区域后球应被拉向**世界 +Z**;`Affected4` 为世界 −Y、`Affected6` 为世界 −X、
+   `Affected8` 为世界 +X(与 §48.2 表对齐)。
+4. **新 WASD 关键判据**:站在块重力 ≠ −Z 的区域(例如 `Affected8` 旁边的 +X 重力区),W/S 应让球沿世界
+   ±Z 上爬/下爬、A/D 沿水平横移;且**转动相机时 A/D 方向不再跟着变** —— 这是与旧"相机相对"行为的分水岭。
+   重力回到 −Z 后,WASD 应恢复原来的相机相对手感。
+5. **转向器**:走到 `SM_LDI_Gravityshift_N` 弯道,球当前重力沿该件 A 或 B 时进弯、出弯重力换到另一面;
+   不触发就把组件 `debug_log=True`(属性名是 `debug_log`,不是 `bDebugLog`),日志会打
+   `[GSRedirector] ... gate[face|touch|side|lip|speed|align]` 指出卡在哪一关。
+
+### 48.8 给下一个 AI
+
+- 本轮所有关卡实例改动的"真相源"是 §48.2 两张表 + `Re_Blockout.umap` 已存盘的状态;改之前先**回读**,
+  别信旧对话里的数值(本轮就发现上一轮两个转向器没被回读校验过)。
+- 改 uMap 的固定套路:改 → `save_current_level()` → **同一脚本里回读并把世界方向验算打印出来**
+  (`GravityAxisLocal`/`bGravityRises` 必须换算成世界向量再看,别直接读字段)。
+- 相关记忆(跨会话):`gs-redirector-ab-convention`(A/B 约定 + 本轮两法互校)、`ue-editor-viewport-screenshot`、
+  `blockouttools-bounds-vs-collision`、`livecoding-patch-not-persisted`、`ue-python-subobject-api-traps`。
+- 用户明确的一次性决定都写在本节,别自作主张改回:世界轴约定(§48.1)、`Affected7` 取 +Z(§48.1)、
+  `Affected8` 用质量控制而非关碰撞(§48.2)。
