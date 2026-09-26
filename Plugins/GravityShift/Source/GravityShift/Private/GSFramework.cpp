@@ -122,19 +122,78 @@ void AGSGravityHUD::DrawHUD()
 	// and suppress the corner debug block so the text reads cleanly.
 	if (Ball->IsMessageLocked())
 	{
-		UFont* Font = GEngine->GetMediumFont();
-		const FString Message = Ball->GetPendingMessage().ToString();
-		Canvas->SetDrawColor(TextColor.ToFColor(true));
+		// ⚠ lambda 里不能按名捕获成员(Canvas 是 AHUD 的非静态成员 ⇒ C2327/C2065):
+		// 先落成局部指针,再按值捕获这两个局部变量。
+		UCanvas* const DrawCanvas = Canvas;
+		// 线索用**大号字**(用户:拾取的字体大一点)。
+		UFont* const DrawFont = GEngine->GetLargeFont();
+		const FColor MainColor = TextColor.ToFColor(true);
+		// 线索压在场景上读:先往右下描一层近黑再画正文(纯白字在亮面上会糊)。
+		// 单层偏移描边足够,不用画四份。
+		auto DrawCentered = [DrawCanvas, DrawFont](const FString& Text, float Y, const FColor& Shadow, const FColor& Main)
+		{
+			float W = 0.0f, H = 0.0f;
+			DrawCanvas->StrLen(DrawFont, Text, W, H);
+			const float X = (DrawCanvas->SizeX - W) * 0.5f;
+			DrawCanvas->SetDrawColor(Shadow);
+			DrawCanvas->DrawText(DrawFont, Text, X + 2.0f, Y + 2.0f, 1.0f, 1.0f);
+			DrawCanvas->SetDrawColor(Main);
+			DrawCanvas->DrawText(DrawFont, Text, X, Y, 1.0f, 1.0f);
+		};
+		const FColor ShadowColor(0, 0, 0, 190);
 
-		float W = 0.0f, H = 0.0f;
-		Canvas->StrLen(Font, Message, W, H);
-		Canvas->DrawText(Font, Message, (Canvas->SizeX - W) * 0.5f, Canvas->SizeY * 0.4f, 1.0f, 1.0f);
+		// 线索支持多行(拾取物的 PickupMessage 是 MultiLine):逐行居中,行距 = 行高 + 8。
+		TArray<FString> MessageLines;
+		Ball->GetPendingMessage().ToString().ParseIntoArrayLines(MessageLines, /*bCullEmpty=*/false);
+		if (MessageLines.Num() == 0)
+		{
+			MessageLines.Add(FString());
+		}
+
+		// 自动折行:字放大之后单行可能顶到屏幕边(线索往往很长)。按"一个中文字"的宽度
+		// 估算每行能放几个字,超长行硬折 —— CJK 场景足够;拉丁文只会偏保守(可能折在词中)。
+		// 作者自己敲的换行(ParseIntoArrayLines)优先保留,只在更超长时才再折。
+		{
+			float CharW = 0.0f, CharH = 0.0f;
+			DrawCanvas->StrLen(DrawFont, TEXT("字"), CharW, CharH);
+			const int32 MaxCharsPerLine = (CharW > 0.0f)
+				? FMath::Max(8, FMath::FloorToInt((DrawCanvas->SizeX * 0.8f) / CharW))
+				: 48;
+			TArray<FString> Wrapped;
+			for (const FString& SrcLine : MessageLines)
+			{
+				if (SrcLine.IsEmpty())
+				{
+					Wrapped.Add(FString());
+					continue;
+				}
+				for (int32 Start = 0; Start < SrcLine.Len(); Start += MaxCharsPerLine)
+				{
+					Wrapped.Add(SrcLine.Mid(Start, MaxCharsPerLine));
+				}
+			}
+			MessageLines = Wrapped;
+		}
+
+		float LineH = 0.0f;
+		for (const FString& Line : MessageLines)
+		{
+			float W = 0.0f, H = 0.0f;
+			DrawCanvas->StrLen(DrawFont, Line, W, H);
+			LineH = FMath::Max(LineH, H);
+		}
+		const float LineStep = LineH + 8.0f;
+
+		float Y = DrawCanvas->SizeY * 0.4f;
+		for (const FString& Line : MessageLines)
+		{
+			DrawCentered(Line, Y, ShadowColor, MainColor);
+			Y += LineStep;
+		}
 
 		const FKey DismissKey = Ball->GetMessageDismissKey();
 		const FString KeyLabel = (DismissKey == EKeys::SpaceBar) ? TEXT("空格") : DismissKey.GetDisplayName().ToString();
-		const FString Hint = FString::Printf(TEXT("按 %s 继续"), *KeyLabel);
-		Canvas->StrLen(Font, Hint, W, H);
-		Canvas->DrawText(Font, Hint, (Canvas->SizeX - W) * 0.5f, Canvas->SizeY * 0.4f + 48.0f, 1.0f, 1.0f);
+		DrawCentered(FString::Printf(TEXT("按 %s 关闭"), *KeyLabel), Y + 20.0f, ShadowColor, MainColor);
 		return;
 	}
 
@@ -194,18 +253,37 @@ void AGSGravityHUD::DrawHUD()
 			Ball->WorldStateManager->GetRequiredGoalValue()));
 	}
 
+	// —— 拾取/查看提示:**悬在物体正上方**(2026-09-25 用户要求"靠近后物体上方有拾取提醒的字");
+	// 原先是在左下角调试块里打一行,现在改成世界点投影到画布,只在该物体进入互动半径时出现。
 	if (bShowInteractionPrompt)
 	{
+		AActor* Target = Ball->GetCurrentInteractable();
 		const FText Prompt = Ball->GetCurrentInteractionText();
-		if (!Prompt.IsEmpty())
+		if (Target && !Prompt.IsEmpty() && Canvas->SceneView)
 		{
-			Lines.Add(Prompt.ToString());
+			// 用 actor 的包围盒顶面再往上抬 40cm,提示不会压在物体身上。
+			FVector BoundsOrigin, BoundsExtent;
+			Target->GetActorBounds(/*bOnlyCollidingComponents=*/false, BoundsOrigin, BoundsExtent);
+			const FVector LabelWorld(BoundsOrigin.X, BoundsOrigin.Y, BoundsOrigin.Z + BoundsExtent.Z + 40.0f);
+			const FVector Screen = Canvas->Project(LabelWorld);
+			if (Screen.Z > 0.0)
+			{
+				UFont* PromptFont = GEngine->GetLargeFont();
+				const FString PromptStr = Prompt.ToString();
+				float PW = 0.0f, PH = 0.0f;
+				Canvas->StrLen(PromptFont, PromptStr, PW, PH);
+				const float PX = Screen.X - PW * 0.5f;
+				Canvas->SetDrawColor(FColor(0, 0, 0, 200));
+				Canvas->DrawText(PromptFont, PromptStr, PX + 2.0f, Screen.Y + 2.0f, 1.0f, 1.0f);
+				Canvas->SetDrawColor(TextColor.ToFColor(true));
+				Canvas->DrawText(PromptFont, PromptStr, PX, Screen.Y, 1.0f, 1.0f);
+			}
 		}
 	}
 
 	if (bShowControls)
 	{
-		Lines.Add(TEXT("WASD roll  |  RMB aim / LMB flip object gravity  |  Q/E or wheel camera dist  |  O/P speed  |  F interact  |  R reset"));
+		Lines.Add(TEXT("WASD roll  |  RMB aim / LMB flip object gravity  |  Q/E or wheel camera dist  |  O/P speed  |  F pick up / read (F again closes)  |  R reset"));
 	}
 
 	float Y = StartPosition.Y;

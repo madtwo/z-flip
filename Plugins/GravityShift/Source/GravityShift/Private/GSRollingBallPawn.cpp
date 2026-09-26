@@ -1643,9 +1643,10 @@ void AGSRollingBallPawn::PollNativeInput()
 	UpdateAiming();
 
 	const bool bInteractDown = PC->IsInputKeyDown(InteractKey);
+	bool bInteractConsumed = false;
 	if (bInteractDown && !bInteractKeyWasDown)
 	{
-		TryInteract();
+		bInteractConsumed = TryInteract();
 	}
 	bInteractKeyWasDown = bInteractDown;
 
@@ -1666,7 +1667,12 @@ void AGSRollingBallPawn::PollNativeInput()
 	bTrailCloserKeyWasDown = bTrailCloserDown;
 
 	const bool bTrailFartherDown = PC->IsInputKeyDown(TrailFartherKey);
-	if (bTrailFartherDown && !bTrailFartherKeyWasDown)
+	// 互动键与相机拉远键**同键时**的让路(2026-09-25):这一帧真的互动到了就不拉相机,
+	// 否则站在可拾取物旁边按同一根键会一边弹线索一边把镜头拉远。
+	// 现状 InteractKey=F / TrailFartherKey=E,两者不同 ⇒ 这道闸门平时**不生效**;
+	// 留着是防以后把互动键挪回 E —— 那时它就是唯一挡住"一次按下双触发"的东西。
+	// 判定用 TryInteract() 的返回值(找得到目标且 CanInteract 为真才为 true)。
+	if (bTrailFartherDown && !bTrailFartherKeyWasDown && !bInteractConsumed)
 	{
 		StepCameraDistance(1.0f);
 	}
@@ -1749,6 +1755,12 @@ void AGSRollingBallPawn::ShowMessageAndLock(const FText& Message)
 	PendingMessage = Message;
 	bInputLocked = true;
 	SetMoveInput(FVector2D::ZeroVector);
+
+	// 同一根键开关(互动键 E == 关闭键 E)时的"同一次按下"防护:把当前按下状态记成已处理,
+	// 否则下一帧(已进锁定分支)还读到 E 按住 → 立刻把刚弹出的线索关掉,表现为"闪一下没了"。
+	// 玩家要看到的是:E 按下(松开)→ 线索出来 → 再按一次 E 才关。
+	const APlayerController* PC = Cast<APlayerController>(GetController());
+	bDismissKeyWasDown = PC && PC->IsInputKeyDown(DismissMessageKey);
 }
 
 void AGSRollingBallPawn::DismissPendingMessage()
@@ -2069,6 +2081,17 @@ FText AGSRollingBallPawn::GetCurrentInteractionText() const
 	}
 
 	return FText::GetEmpty();
+}
+
+AActor* AGSRollingBallPawn::GetCurrentInteractable() const
+{
+	// HUD 用:把"提示画在哪个物体头上"这件事交给同一套就近判定,不另写第二份。
+	AActor* Target = FindBestInteractable();
+	if (Target && IGSInteractable::Execute_CanInteract(Target, const_cast<AGSRollingBallPawn*>(this)))
+	{
+		return Target;
+	}
+	return nullptr;
 }
 
 void AGSRollingBallPawn::AdjustDriveSpeed(float Direction)

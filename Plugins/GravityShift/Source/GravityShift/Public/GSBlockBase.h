@@ -64,9 +64,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	bool bZeroBounceOnLand = true;
 
-	/** 玩家推不动:质量抬到 ImmovableMassKg(自定义重力是质量无关加速度,±Z 切换不受影响)。 */
+	/** 玩家推不动(2026-09-17 用户要求"可改变重力方块应该完全推不动",默认开):
+	 *  两道保障——①质量抬到 ImmovableMassKg;②每帧把"垂直于方块自身重力轴"的速度分量清零,
+	 *  玩家球撞上去连几厘米的位移都不会有(只靠质量方案仍会被高速球顶动几厘米)。
+	 *  方块自己的 ±Z 切换/升起来照常:那是**沿重力轴**的质量无关加速度,两道保障都不碰这个方向。
+	 *  需要能被推着走的方块,在实例上单独取消勾选即可。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
-	bool bImmovableByPlayer = false;
+	bool bImmovableByPlayer = true;
 
 	/** 推不动方案采用的质量(kg),玩家球撞上去几乎不产生位移。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift", meta = (ClampMin = "1.0"))
@@ -150,6 +154,10 @@ public:
 	void SetAimHighlight(bool bOn);
 
 	virtual void BeginPlay() override;
+
+	// 完全推不动(见 bImmovableByPlayer):每帧把垂直于方块自身重力轴的速度分量清零。
+	// 只在 bImmovableByPlayer 时开 Tick(可推的方块零开销)。
+	virtual void Tick(float DeltaSeconds) override;
 
 protected:
 	bool bAimHighlightOn = false;

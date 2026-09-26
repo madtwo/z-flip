@@ -144,13 +144,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Debug")
 	bool bRedirectDebugLog = false;
 
-	// Interact moved from E to F: E is now the camera-distance key (Q/E).
+	// 互动/拾取键(2026-09-25 用户口径:"按下 F 拾取,再按 F 关闭")。
+	// F 本来就是这根键的位置(注释曾写"Interact moved from E to F: E 已成相机距离键");
+	// 本轮一度按用户口头要求改成 E 做"一键两用",用户实测前拍板**回到 F** ——
+	// 这样互动与 Q/E 相机调距彻底解耦,不会再出现"按一下既拾取又拉镜头"。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
 	FKey InteractKey = EKeys::F;
 
-	// Dismisses a center-screen pickup message (see ShowMessageAndLock).
+	// 关闭居中消息的键(见 ShowMessageAndLock)。跟互动键同一个 F:按一次拾取/看线索,
+	// 再按一次关闭 —— 同键开关的"同一次按下不重复触发"由 ShowMessageAndLock 处理。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
-	FKey DismissMessageKey = EKeys::SpaceBar;
+	FKey DismissMessageKey = EKeys::F;
 
 	// Player camera-distance keys: Q pulls the rail camera closer, E sends it back.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Input")
@@ -726,6 +730,10 @@ public:
 
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
 	FText GetCurrentInteractionText() const;
+
+	// 当前就近可互动目标(HUD 拿它在物体正上方画"拾取/查看 (F)"提示);没有则 nullptr。
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "GravityShift")
+	AActor* GetCurrentInteractable() const;
 
 	// Shows Message center-screen and suppresses gameplay input until the player
 	// presses DismissMessageKey. Used by pickups/key hints.

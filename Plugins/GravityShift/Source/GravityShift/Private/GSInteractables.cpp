@@ -507,6 +507,21 @@ bool AGSPickupItem::CanInteract_Implementation(APawn* InstigatorPawn)
 
 bool AGSPickupItem::Collect(APawn* Collector)
 {
+	// 线索物(bConsumeOnPickup=false):物体留在原地,只把线索文本调出来 —— 按 E 查看、
+	// 再按 E 关闭,还能反复打开(线索牌/读板用法)。这里**故意不置 bIsCollected**,
+	// 所以 CanInteract 一直为真、FindBestInteractable 也一直能选中它。
+	if (!bConsumeOnPickup)
+	{
+		if (AGSRollingBallPawn* Ball = Cast<AGSRollingBallPawn>(Collector))
+		{
+			if (!PickupMessage.IsEmpty())
+			{
+				Ball->ShowMessageAndLock(PickupMessage);
+			}
+		}
+		return true;
+	}
+
 	if (bIsCollected)
 	{
 		return false;
@@ -540,7 +555,7 @@ FText AGSPickupItem::GetInteractionText_Implementation(APawn* InstigatorPawn)
 	{
 		return FText::GetEmpty();
 	}
-	return FText::FromString(TEXT("拾取 (F)"));
+	return FText::FromString(bConsumeOnPickup ? TEXT("拾取 (F)") : TEXT("查看线索 (F)"));
 }
 
 void AGSPickupItem::RestoreInitialState()

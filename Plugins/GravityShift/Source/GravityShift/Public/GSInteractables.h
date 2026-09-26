@@ -260,9 +260,15 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "GravityShift|Components")
 	TObjectPtr<UStaticMeshComponent> Mesh = nullptr;
 
-	// Center-screen text shown on pickup. Empty = collect silently, no input pause.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
+	// 线索/拾取文本:居中显示并暂停输入,按互动键(E)关闭。支持多行 —— 编辑器 Details 里
+	// Shift+Enter 换行,每一行都会居中画出来(线索可以写成几行)。空 = 静默拾取,不暂停输入。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift", meta = (MultiLine = "true"))
 	FText PickupMessage;
+
+	// 拾取后是否消失。true(默认)= 标准拾取:物体隐藏、世界重置时复位;
+	// false = 线索物/牌子:物体留在原地,每次按 E 都能把这段线索调出来、再按 E 关掉(可反复读)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
+	bool bConsumeOnPickup = true;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "GravityShift")
 	bool bIsCollected = false;
