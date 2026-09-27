@@ -338,9 +338,13 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	{
 		if (bGateDebug)
 		{
-			UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s gate[%s] ball=(%.0f,%.0f,%.0f) v=(%.0f,%.0f,%.0f) speed=%.0f exit=%s align=%.2f touch=%d"),
+			// g= 是**球当前的重力**(2026-09-25 加):gate[face] 拒的就是"球的重力不贴 A/B 任一面",
+			// 不把这个数打出来就只能猜玩家是从哪个面过来的。
+			const FVector BallG = Ball->GetActiveGravityDirection().GetSafeNormal();
+			UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s gate[%s] ball=(%.0f,%.0f,%.0f) v=(%.0f,%.0f,%.0f) speed=%.0f g=(%.2f,%.2f,%.2f) exit=%s align=%.2f touch=%d"),
 				*GetNameSafe(GetOwner()), Stage, BallLoc.X, BallLoc.Y, BallLoc.Z,
 				Velocity.X, Velocity.Y, Velocity.Z, Speed,
+				BallG.X, BallG.Y, BallG.Z,
 				*ExitDirForLog.ToString(), Align, bTouch ? 1 : 0);
 		}
 	};
@@ -404,6 +408,23 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		GateLog(TEXT("side"), ExitDir, NormalAxisDot, true);
 		return;
 	}
+
+	// **只有贴在内弧面上才触发**(2026-09-25 用户要求,见头文件 bRequireInnerArcFace):
+	// 接触法线必须落在"入口面法线 ↔ 出口面法线"的内侧象限。球贴的是滑梯**背面/外底面**
+	// (凸面那一侧)时,法线与两个面法线同时反向 → 拒;骑在弧面上时法线在两面之间连续转动 → 通过。
+	// 这条与上面的 gate[side](左右侧壁)互补:一个治"背面",一个治"侧面",合起来就是
+	// 用户要的"只有弧面才转重力"。
+	if (bRequireInnerArcFace)
+	{
+		const float InnerEntryDot = FVector::DotProduct(ContactNormal, EntryUp);
+		const float InnerExitDot = FVector::DotProduct(ContactNormal, ExitUp);
+		if (InnerEntryDot < -ArcFaceNormalTolerance || InnerExitDot < -ArcFaceNormalTolerance)
+		{
+			GateLog(TEXT("arcface"), ExitDir, InnerEntryDot, true);
+			return;
+		}
+	}
+
 
 	// **只有碰到"正面接地那一块"才触发**(用户要求):球心到入口侧面(地面/墙/天花板
 	// 那一侧的面)的距离 ≤ 球半径 + EntryLipBandCm 才算碰在圆弧接地处;碰在滑梯顶面/

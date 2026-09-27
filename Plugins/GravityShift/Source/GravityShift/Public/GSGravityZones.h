@@ -94,10 +94,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gravity Detector", meta = (ClampMin = "0.0"))
 	float MinTriggerSpeed = 50.0f;
 
-	// 速度方向与前向夹角的最小余弦值。球侧向擦过触发盒时方向读不出来,低于此值
-	// 不切区域(否则 Dot 的正负会把区域随机切到一侧)。
+	// 速度方向与前向夹角的最小余弦值(2026-09-17 用户实测收紧:0.2 → 0.7)。
+	// 0.2 ≈ 78°,等于"侧着蹭一下这个体积就切区域" —— 用户就是碰了那个块、区域一翻、
+	// 脚下的方块失去重力,人跟着掉进电梯井底下。
+	// 改成 0.7 ≈ 45°:必须**真的沿着这个面的方向穿过阈值面**才算,擦边不算。
+	// (用户原话:"判定是只有球在那个面上,且给这个面对应方向一定加速度,才判定重力改变"。)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gravity Detector", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float MinDirectionalDot = 0.2f;
+	float MinDirectionalDot = 0.7f;
 
 	// 闪一次(重复调用会把计时重新拉满)。
 	UFUNCTION(BlueprintCallable, Category = "Gravity Detector")

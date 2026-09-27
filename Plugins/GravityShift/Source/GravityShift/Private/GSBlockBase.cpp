@@ -42,6 +42,34 @@ AGSBlockBase::AGSBlockBase()
 	// Snap is opt-in per block profile. Off by default so existing (non-grid-aligned)
 	// levels are unaffected; grid levels enable it on the BlockProfile.
 	GridSnapComponent->SetSnapEnabled(false);
+
+	// Tick 默认关,只有"玩家推不动"的方块在 BeginPlay 里打开(见 bImmovableByPlayer)。
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = false;
+}
+
+void AGSBlockBase::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	// 完全推不动:方块只该沿**自己的重力轴**动(±Z 切换/升起来就是沿轴走),而玩家球撞上来的
+	// 是垂直于轴的方向。垂直分量每帧清零 —— 那一帧的横向速度留不到下一帧,玩家怎么撞都推不动。
+	// (只靠 ImmovableMassKg=2000kg 时,高速球仍能把方块顶出几厘米;这道是硬保障。)
+	if (!bImmovableByPlayer || !Mesh || !Mesh->IsSimulatingPhysics())
+	{
+		return;
+	}
+	const FVector Axis = GetGravityAxisWorld().GetSafeNormal();
+	if (Axis.IsNearlyZero())
+	{
+		return;
+	}
+	const FVector Velocity = Mesh->GetPhysicsLinearVelocity();
+	const FVector AlongAxis = Axis * FVector::DotProduct(Velocity, Axis);
+	if (!(Velocity - AlongAxis).IsNearlyZero(0.5f))
+	{
+		Mesh->SetPhysicsLinearVelocity(AlongAxis);
+	}
 }
 
 void AGSBlockBase::BeginPlay()
@@ -61,6 +89,10 @@ void AGSBlockBase::BeginPlay()
 	{
 		GravityBody->RefreshReferences();
 	}
+
+	// "玩家推不动"的方块才开 Tick(每帧清横向速度,见 Tick)。
+	PrimaryActorTick.bStartWithTickEnabled = false;
+	SetActorTickEnabled(bImmovableByPlayer);
 }
 
 void AGSBlockBase::ApplyBlockProfile(UGSBlockProfile* NewProfile)

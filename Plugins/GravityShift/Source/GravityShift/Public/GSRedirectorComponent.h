@@ -121,6 +121,23 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "0.0"))
 	float SeparationRejectSpeedCm = 150.0f;
 
+	// **只有"内弧面"才触发**(2026-09-25 用户:"只有在弧面施加对应方向一定加速度才转重力"、
+	// "碰到底面和侧面就会转重力,这个也要改")。判据 = 接触面法线必须落在
+	// **入口面法线 ↔ 出口面法线张成的内侧象限**里:
+	//     dot(接触法线, 入口面法线) ≥ -ArcFaceNormalTolerance  且
+	//     dot(接触法线, 出口面法线) ≥ -ArcFaceNormalTolerance
+	// 滑梯的**背面/外底面**(凸面那一侧,球从外面贴上去的那一面)法线与两面法线同时反向 ⇒ 一律被拒;
+	// 而球真正骑在弧面上时,接触法线从入口面法线连续转到出口面法线,**全程通过**。
+	// 与 MaxLateralNormalDot(gate[side],管左右侧壁)互补:一个管"背面",一个管"侧面"。
+	// 关掉 = 回到 2026-09-13 的行为(碰背面/外底面也可能触发)。A/B 对称,不改变双向性。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector")
+	bool bRequireInnerArcFace = true;
+
+	// 上面那条门的容差:接触法线与面法线的余弦要**低于** -该值 才算"贴的是背面"。
+	// 默认 0.15 ≈ 法线偏出 90°+8.6°,给弧面与平面交界处的法线抖动留余量。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ArcFaceNormalTolerance = 0.15f;
+
 	// ---- 特殊滑梯:面吸附模式(2026-09-15 用户需求,给关卡里那条独一无二的滑梯) ----
 	// 勾上后本转向器不再走"90° 弯道滑行",而是:球**碰到竖直面(垂直于地面的那一面)**
 	// → 吸附 → 沿曲面被自然带到平面(平行地面的那一面)→ 重力转成该面的重力(通常向下)。
