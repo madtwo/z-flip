@@ -354,13 +354,20 @@ void UGSGravityBodyComponent::ResolveTickImpact(float ApproachSpeedCm)
 
 	// Trace along the direction it was travelling when it stopped; the surface it hit is
 	// within its own bounds of the body centre now that the two are in contact.
-	const FVector Start = TargetPrimitive->GetComponentLocation();
+	// Start from the bounds centre, not the component location: meshes whose pivot sits on a
+	// corner (local bounds 0..100, e.g. SM_LDI_GravityAffected) reach further than
+	// SphereRadius + margin from the pivot, and the trace used to stop short of the very
+	// surface it had just hit.
+	const FBoxSphereBounds Bounds = TargetPrimitive->GetBounds();
+	const FVector Start = Bounds.Origin;
 	const FVector Dir = TickImpactApproachDirection;
-	const float TraceLen = TargetPrimitive->GetBounds().SphereRadius + TickImpactTraceMarginCm;
+	const float TraceLen = Bounds.SphereRadius + TickImpactTraceMarginCm;
 	FCollisionQueryParams Params(NAME_None, /*bTraceComplex=*/false, Self);
 	FHitResult Hit;
 	if (!World->LineTraceSingleByChannel(Hit, Start, Start + Dir * TraceLen, ECC_Visibility, Params))
 	{
+		UE_LOG(LogTemp, Log, TEXT("[GravityShift] tick impact miss: v=%.0fcm/s start=%s dir=%s len=%.1f"),
+			ApproachSpeedCm, *Start.ToCompactString(), *Dir.ToCompactString(), TraceLen);
 		return;
 	}
 
