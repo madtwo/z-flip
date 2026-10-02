@@ -37,10 +37,14 @@
 - **当前关卡可能是未保存的 `/Temp/Untitled_N`**——任何依赖关卡的脚本先显式打开目标关卡并断言:
   ```python
   import unreal
-  sub = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
-  sub.load_level("/Game/测试案例")            # 包路径,不带 .umap;先确认磁盘上存在
-  print(sub.get_editor_world().get_name())     # 断言
+  # load_level 在 LevelEditorSubsystem 上(2026-10-01 实踩:
+  # UnrealEditorSubsystem 没有 load_level,直接调报 AttributeError)
+  les = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+  ok = les.load_level("/Game/Maps/Level1")     # 包路径,不带 .umap;先确认磁盘上存在;返回 bool
+  # 读当前关卡要走 UnrealEditorSubsystem
+  print(unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world().get_name())  # 断言
   ```
+  相关只读接口:`LevelEditorSubsystem.get_current_level()` / `save_current_level()` / `set_current_level_by_name()`
 - `get_all_level_actors` 在编辑器繁忙/PIE 期间可能返回陈旧或不完整数据;先打类直方图再找目标,必要时用选中集
 
 ## Bash → Python 传递坑(MSYS)
