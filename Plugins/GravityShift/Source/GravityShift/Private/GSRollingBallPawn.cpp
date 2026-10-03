@@ -55,8 +55,15 @@ AGSRollingBallPawn::AGSRollingBallPawn()
 	BallMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	BallMesh->SetEnableGravity(false);
 
+	// 主角球外观:ToyBall(项目资产,半径 50cm)优先;缺失时退回引擎球体(同样 50cm 半径),
+	// 这样 ApplyBallProfile 里 RadiusCm/50 的缩放假设对两种网格都成立。
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> ToyBallAsset(TEXT("/Game/GravityShift/Art/ToyBall/ToyBall/StaticMeshes/ToyBall"));
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereAsset(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-	if (SphereAsset.Succeeded())
+	if (ToyBallAsset.Succeeded())
+	{
+		BallMesh->SetStaticMesh(ToyBallAsset.Object);
+	}
+	else if (SphereAsset.Succeeded())
 	{
 		BallMesh->SetStaticMesh(SphereAsset.Object);
 	}
@@ -218,7 +225,8 @@ void AGSRollingBallPawn::ApplyBallProfile(UGSBallProfile* NewProfile)
 
 	if (BallMesh)
 	{
-		// /Engine/BasicShapes/Sphere has a 50cm radius.
+		// 两种候选网格的原生半径都是 50cm(/Engine/BasicShapes/Sphere 与 ToyBall 实测包围盒
+		// 100x100x100),所以这里用 RadiusCm/50 换算视觉缩放。
 		const float Scale = NewProfile->RadiusCm / 50.0f;
 		BallMesh->SetWorldScale3D(FVector(Scale));
 	}
@@ -1163,17 +1171,29 @@ void AGSRollingBallPawn::SetBallMeshFaded(bool bFaded)
 			BallMesh->SetVisibility(false);
 			return;
 		}
-		if (!BallMeshOriginalMaterial)
+		const int32 NumSlots = BallMesh->GetNumMaterials();
+		if (BallMeshOriginalMaterials.Num() != NumSlots)
 		{
-			BallMeshOriginalMaterial = BallMesh->GetMaterial(0);
+			BallMeshOriginalMaterials.Reset();
+			for (int32 Slot = 0; Slot < NumSlots; ++Slot)
+			{
+				BallMeshOriginalMaterials.Add(BallMesh->GetMaterial(Slot));
+			}
 		}
 		BallMeshFadeMID->SetScalarParameterValue(TEXT("Opacity"), BallMeshFadeOpacity);
 		BallMesh->SetVisibility(true);
-		BallMesh->SetMaterial(0, BallMeshFadeMID);
+		for (int32 Slot = 0; Slot < NumSlots; ++Slot)
+		{
+			BallMesh->SetMaterial(Slot, BallMeshFadeMID);
+		}
 	}
-	else if (BallMeshOriginalMaterial)
+	else if (BallMeshOriginalMaterials.Num() > 0)
 	{
-		BallMesh->SetMaterial(0, BallMeshOriginalMaterial);
+		const int32 NumSlots = BallMesh->GetNumMaterials();
+		for (int32 Slot = 0; Slot < BallMeshOriginalMaterials.Num() && Slot < NumSlots; ++Slot)
+		{
+			BallMesh->SetMaterial(Slot, BallMeshOriginalMaterials[Slot]);
+		}
 		BallMesh->SetVisibility(true);
 	}
 }
