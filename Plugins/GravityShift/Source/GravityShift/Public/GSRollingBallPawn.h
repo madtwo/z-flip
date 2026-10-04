@@ -622,12 +622,13 @@ public:
 	// 球网格隐藏滞回状态(瞬时,非反射)。
 	bool bBallMeshHidden = false;
 
-	// 半透明用的动态材质实例 + 球原本的材质(退出贴脸时还原)。
+	// 半透明用的动态材质实例 + 球原本各材质槽的材质(退出贴脸时逐槽还原)。
+	// ToyBall 有 4 个材质槽,只记 slot 0 会让其余槽在贴脸淡出时仍是实心。
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> BallMeshFadeMID = nullptr;
 
 	UPROPERTY(Transient)
-	TObjectPtr<UMaterialInterface> BallMeshOriginalMaterial = nullptr;
+	TArray<TObjectPtr<UMaterialInterface>> BallMeshOriginalMaterials;
 
 	// ---- 转向器过渡状态(瞬时,非反射) ----
 	bool bGravityRedirectActive = false;
