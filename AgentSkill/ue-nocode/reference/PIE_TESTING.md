@@ -136,6 +136,98 @@ pawn  = unreal.GameplayStatics.get_player_pawn(w, 0)
 - **相机航向是 Pawn 实例的残留状态**:自动驱动的方向 = 相机前向在支撑面上的投影,而航向在 PIE 会话里跨多次脚本累加(每次 `add_camera_look_input` 都是相对量)→ 同一会话里连续测多个方向会跑偏。对策:按**绝对角度**重设——读 `pawn.get_editor_property('camera_pivot').get_forward_vector()` 的水平分量反推当前航向角,再 `add_camera_look_input(目标角−当前角)`;或者每个方向用例重启一次 PIE。
 - **顺带:CDO 写入被引擎安全层拦**(`Blocked unsafe Python code: get_default_object() modification`)——调试开关只能在**实例**上 `set_editor_property`;这也解释了更早"改了 CDO、PIE 新实例读不到"的谜团(写入根本没生效)。
 
+## PIE 真实输入注入:四条通道与选择(2026-09-14 两轮专家包验收定型)
+
+> 本机注入的完整能力矩阵与"焦点前提"配方见 `WINDOWS_INPUT_LIMITS.md`;本节只列验收常用结论。
+
+要验"真实按键/鼠标路径"(E 拾取、RMB 使用、WASD 驾驶等),四条通道实测结论:
+
+| 通道 | 结论 |
+|---|---|
+| `ke <键> Down` 控制台命令 | **对 EnhancedInput 项目完全无效**(W 按下球不动)。只走 Legacy BindKey 路径,别用 |
+| `PostMessage(WM_KEYDOWN)` | **被引擎丢弃**(不报错但输入不进)。鼠标的 PostMessage 点击对 Slate 有效,键盘无效 |
+| **CUA 工具(首选)** | `open_application(activate=true)` 激活编辑器 + `left_click` 点一下视口拿键盘焦点,之后 `key`/`hold_key`/`click`/`right_click` 全部有效。`hold_key` 是唯一"按住 N 秒"通道,但调用阻塞、无法在按住期间并行采样 |
+| **OS 级 keybd_event/mouse_event(按住+采样最佳)** | 配合 CUA 激活后,在**同一个 bash 脚本**里按序执行 `key down → sleep N → ue_pyexec 读 → rg_shot 截图 → key up`。分开调用会因思考延迟错过时间窗口(踩过 4 次) |
+
+**前提与坑(每条都实踩过)**:
+- 注入前确认前台窗口是编辑器(`GetForegroundWindow`);**键会打到当前前台窗口**——实测打到了用户正在看的浏览器上。
+- `SetForegroundWindow` 从后台脚本调用会被 Windows 前台锁定拒绝(不报错但不生效)→ 用 CUA 的 `open_application(activate=true)` 代替。
+- **重启 PIE 后视口焦点丢失**,必须重新 `left_click` 视口,否则后续注入全部无效。
+- CUA **没有"右键按住"**(只有 right_click 单击);`SendInput`/`mouse_event` 的 `MOUSEEVENTF_ABSOLUTE` 坐标要归一化到 0..65535(传像素值光标会飞到屏幕角)。
+- 单击(down/up 间隔 <1 帧)只能触发"按下一帧内完成"的逻辑(耕地 ✓、kick 级别冲量 ✗),**测不了按住持续效果**——要靠通道 4。
+- 每个 `ue_pyexec` 执行期间世界暂停,读到的是**暂停瞬间**的状态;"按住期间采样"不受影响(按键状态在恢复后保持)。
+- Git Bash 里写 python 脚本:**脚本内部硬编码的 `/tmp/x` 不会被路径转换**(只有命令行参数里的会被 MSYS 转),脚本里用 `C:/Users/<用户>/AppData/Local/Temp/` 全路径。
+
+### 编排:注入器与 runner 的进程生命周期(2026-09-19 实测,真实 RMB 验收轮)
+
+真实输入验收 = **probe(UE 内 Python)** + **injector(OS 级键鼠)** + **runner(PowerShell)** 三方协作。时序错一次,结论就是假的。
+
+- **握手用 flag 文件,不用 sleep**:probe 进入等待态后写 `*_ready.flag`,injector 只在校到 flag 后才动作,动作完成写 `*_down/up.flag`,probe 见到才进下一段。实测时序漂移可达 20 秒,固定 sleep 必错。
+- **★ runner 必须 `Start-Process -PassThru` 拿到两个 Process 对象,并等"真实 UE 进程"退出**:直接 `& $Editor …`(GUI 程序)在 Windows 上可能**立刻交回控制权**,旧 runner 于是走"固定 10 秒"清理 → **injector 在 flag 出现之前就被杀了**,症状是"注入器什么都没做、没有任何日志"。正确做法:UE 不退出就绝不杀 injector,另设一个**总墙钟超时**(实测 180s)兜真卡死。
+- **injector 的 stdout/stderr 必须自己落盘**:它是唯一能证明"我等到 flag 了 / 我按下去了"的证据。
+- **清理动作与判定动作分开,且清理不许抛**:实测 runner 在清理分支里对一个已退出进程取 `ExitCode` 抛异常,报告于是写成"injector failed",**盖住了 probe 真正的 `REAL_INPUT_DOWN_TIMEOUT`** —— 整轮被误读成另一类故障。
+- **注入前先清残留按键状态**(上一轮卡住的 RIGHTUP),否则本轮第一个事件会被系统吞掉。
+- **注入器本身要能"自证"**:动作前后各写一行日志(pid/前台窗口标题/光标位置),否则无法区分"没等到"与"按了但没生效"。
+- **一轮只启动一次编辑器/PIE**:反复启停既烧时间,本机还会诱发 GPUCrash(见 `UE_EDITOR_LIFECYCLE_AND_HYGIENE.md` §3.5);无人值守验收里,**启动次数要当预算管**。
+
+### 人来当传感器:包装脚本三件套(2026-09-20 实测,"用户飞自由相机定相机端点"那一轮)
+
+当验收仪器就是**用户的眼睛**(构图/手感),不在编辑器里的助手无法注入代码,唯一可行的编排是
+"用户操作 + 包装脚本 + 消费式旗标":
+
+1. **包装脚本 = 上游(专家)脚本一字不改地 `exec` + 自己的只读旁录 + 姿势锁**;
+   上游脚本读文件必须 `encoding="utf-8-sig"`(BOM 会炸 `compile`)。
+2. **可消费旗标**:包装脚本每 tick 轮询 `*_now.flag`,出现 → 执行目标脚本 → **删掉旗标**
+   ("再放一次"= 再抓一次,可反复触发,用户不用被重启编辑器)。
+3. **姿势锁**:`Alt+C` 进自由相机后 RMB 归自由相机,被测姿势会掉 → 每 tick 把 pawn 的 `Aiming` 写 `True`
+   (+ 强制武器网格可见),并留一个 `*_lock_off.flag` 当逃生门。
+4. **只读旁录**:每 0.1 s 落一份 live JSON,目标脚本产物一出现就**冻结一份 snapshot**
+   —— 这是"抓取那一帧到底发生了什么"的唯一独立证据(本轮靠它抓到 `pc0=DebugCameraController` 的假 0)。
+   旁录必须**逐段 try/except**;启动前**清空本轮所有产物和旗标**,否则"读到旧文件"会被误判成成功。
+5. **屏幕上的自检文字**:把 candidate 值与策略打在被测画面上(`SystemLibrary.print_string`),
+   用户截图即证据;注意别盖住 DebugCamera HUD 自带的 `Loc/Rot`(本轮就盖住了全屏小字,只能靠旁录补)。
+
+> 完整回路(同帧捕获 → 只重启 PIE 的快循环 → 冻结 → 真输入验收 + 5 个失败模式)见
+> `ue-vibecoding/reference/HUMAN_LOOP_TUNING.md`。
+
+## 判定"HUD 元素到底有没有画"——PIL 像素扫描(比肉眼可靠)
+
+现象:"代码条件满足、同分支的其他绘制可见,但某个 HUD 元素(速度表/提示)截图里看不到"。
+判定法:全屏截图 → PIL 按目标色扫描像素簇 → 看簇的 bbox 是否在预期屏幕区域。
+- **FLinearColor 是线性值,显示 sRGB 要换算**:速度表橙色 `(1.0, 0.62, 0.08)` 线性 ≈ RGB(255, 207, 79),别按字面值 (255,158,20) 写扫描条件(踩过,漏检)。
+- 扫描出的簇还要排除场景同色物(球体/图标),用"预期区域内的簇数"下结论。
+- 结论写法:速度表 = "同 `bEnablesDriveMode` 条件的 Help 文字已切换、目标框正常绘制,但右下角橙/黑像素簇为 0 → 代码路径在跑、绘制无输出"——这种证据链专家才能定位。
+
+### 追一个"用户说看得见、代码说该在中间"的 HUD 元素(2026-09-23 准心一轮,三次失败后定型)
+
+**任务**:用户报"准心不在屏幕中间",而源码里准心坐标写死 `Canvas->SizeX*0.5f, SizeY*0.5f`。要拿到"用户真正看到的那一帧"。
+
+**三次抓图失败(照抄别再踩)**:
+
+| 次 | 做法 | 结果 |
+|---|---|---|
+| 1 | 带自检开关 `-BBMR116Verify` 启动 + 每帧连拍 | 只落 1 张(game_time=0.389s,**在瞄准窗口之前**)→ 编辑器**崩溃** |
+| 2 | 防御式:只在 `pawn.is_aiming()` 为真时截屏,最多 2 张,拿到即注销回调 | **0 张**(超时 9s < PIE 启动 ~7.3s + 瞄准窗口 ~9.8s)→ 编辑器**再次崩溃** |
+| 3 | 超时窗放到 16s 重跑 | 脚本**没跑起来**:补丁把续行反斜杠写坏 → `SyntaxError: unexpected character after line continuation character` |
+
+**归因(三栏)**:已排除"准心没画"(`crosshair_draw_count=33`)与"截屏把编辑器弄崩"(第 2 次一张都没截仍崩);
+最可能是 **`-BBMR116Verify` 自检(会 `RequestExit`) + PIE + 我注册的 slate tick 回调**三者共存,
+回调活过了 PIE 拆解(访问已拆除对象,`EXCEPTION_ACCESS_VIOLATION reading 0x60`)。
+
+**定型配方**:
+1. **回调只用来"等编辑器热起来"**:`register_slate_post_tick_callback` 里等到预热秒数 → `editor_request_begin_play()`
+   → **同一次 tick 内立刻 `unregister_slate_post_tick_callback`** ⇒ PIE 生命周期内我的代码不再被调用。
+   (给用户"可玩"的验收会话就用这个形状:不带自检开关、不截屏、不 `RequestExit`、不 EndPlay。)
+2. **抓图别用 `-BBMR116Verify`**;要进瞄准态就直接调游戏自己的 `SetAiming(True)`(`BlueprintCallable`,与 RMB 走同一函数)。
+3. **两条独立截图通道**:UE 的 `AutomationLibrary.take_high_res_screenshot` + **OS 层 GDI `CopyFromScreen`**(含窗口边框,能看到 Canvas 之外)。
+4. **"看不见"本身就是结论**:4 条独立帧(含 2 条真瞄准态)里准心色像素数 = 0/91(那 91 个是桌面别的内容,不成十字)/0/0
+   ⇒ 这比"偏了多少像素"更靠前,先报这个。
+5. **canvas ≠ 窗口客户区** 是可测的岔路:DPI 150% 下 `pc.get_viewport_size()` 读到 `[2541,1273]`,而窗口客户区 1706×1018
+   —— 想用像素判"居中"必须先说清**在哪个矩形里居中**。
+
+配套纪律:注册了回调的取证脚本**要在被观测生命周期结束前注销**并给回调体加 try 兜底;
+给脚本打补丁后必须 `py_compile`(`preflight_lint` 抓不到 `SyntaxError`,第 3 次就是这么白跑的)。
+
 ## 无输入驱动的场景机制验证(2026-09-16 实测踩坑,写 C++ 玩法时最省时间的一招)
 
 **要验证的东西**:某个场景机制(滑梯/触发器/吸附)在"球滚进去/贴上去"时是否按设计工作。这种验证不需要人玩,但**不能靠注入速度**。
@@ -153,7 +245,9 @@ pawn  = unreal.GameplayStatics.get_player_pawn(w, 0)
 
 - `HitResult` **没有直接字段**(`r.impact_point` 报 AttributeError)→ 用 `r.to_dict()`(键:`blocking_hit`/`impact_point`/`impact_normal`/`hit_actor`/`hit_component`)或 `get_editor_property`。
 - `SceneComponent` 没有 `get_component_location()` → 用 `get_world_location()`。
-- `PlayerController` 没有 `get_pawn()` → 用 `get_editor_property('pawn')`。
+- `PlayerController` 没有 `get_pawn()`；**`get_editor_property('pawn')` 也不通**（2026-09-26 实测：
+  `Property 'Pawn' for attribute 'pawn' on 'PlayerController' is protected and cannot be read`）
+  → 取 pawn 用 `unreal.GameplayStatics.get_player_pawn(world, 0)`（可读），或 `pc.call_method("K2_GetPawn")`。
 - `unreal.Vector` 没有 `.size()`/`.size()` → 手算 `((a-b).x**2+...) ** 0.5`。
 - `get_all_actors_of_class(w, unreal.StaticMeshActor)` **漏掉蓝图派生的 actor**(如 `Blockout_Corner_Curved_C`)→ 找组件/找特定 actor 一律枚举 `unreal.Actor` 再 `get_components_by_class(...)`。
 - 关卡 actor 上的组件属性:`c.get_editor_property('X')` / `c.set_editor_property('X', v)`,改完 `unreal.EditorLevelLibrary.save_current_level()` 返回 True/False 要打印出来核对。
@@ -165,3 +259,89 @@ pawn  = unreal.GameplayStatics.get_player_pawn(w, 0)
 - 竖扫(找平台顶面/圆弧起点):`line_trace_single(w, (x,y,-250), (x,y,-900), TraceTypeQuery.ECC_VISIBILITY, True, [], DrawDebugTrace.NONE, True)`,沿 y 每 10~20cm 一次,打印 `impact_point.z` + `impact_normal` + actor 名,就能看出"平面 → 圆角(法线在转)→ 竖直面"的剖面和圆角半径。
 - 横扫(找竖直面):固定 z,从远处朝面打,法线 (0,±1,0) 即竖直墙,命中 y 就是墙面位置。
 - 这比在 PIE 里"试出来"快一个数量级;本文的 90° 圆角几何(A 面 z=−500 / B 面 y=−1200 / R≈111)就是 3 次扫描画出来的。
+
+## 编辑器内 Python 驱动 PIE 的定型配方（2026-09-26 实机导出轮，零 C++ 改动）
+
+**用途**：需要"进 PIE 拿实机状态"（相机 / 网格组件 / 角色状态 / 资产尺度）而又**不想改 C++、不想重编**时用这条。
+
+**启动**（PowerShell，一次会话；开之前先过 `ue-cpp-build-cnpath` 步骤 G 的两道硬门）：
+
+```text
+UnrealEditor.exe "<proj>.uproject" "/Game/<Map>.<Map>" -windowed -ResX=1280 -ResY=720 \
+  -nosound -NoSplash "-abslog=<日志文件>" "-ExecCmds=py <脚本绝对路径>"
+```
+
+- **`-ExecCmds` 里的路径含空格时必须整体加引号**；`Start-Process` 传数组**不会**替你加引号，会把它拆成两个参数
+  ⇒ 参数串自己拼好、整体交给 `-ArgumentList`。
+- **`-abslog=` 才落盘**（`-log=` 只是切屏幕日志）。收尾用 `Start-Process -PassThru` 拿 PID，
+  只杀**自己那个 PID**（按进程名会误杀别人的编辑器）。
+
+**脚本骨架**（相位机；不要在主线程里 sleep）：
+
+```python
+import unreal, time, json
+S = {"phase": "boot", "busy": False, "t0": time.time()}
+
+def tick(dt):
+    if S["busy"]:                 # 重入闸：tick 期间可能被嵌套触发
+        return
+    S["busy"] = True
+    try:
+        if S["phase"] == "boot":
+            if time.time() - S["t0"] >= 8.0:            # 等地图加载完再起 PIE
+                ss = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+                S["pie_before"] = bool(ss.is_in_play_in_editor())
+                ss.editor_request_begin_play()           # 返回 void！见下
+                S["phase"] = "pie"
+        elif S["phase"] == "pie":
+            w = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
+            if w is None:
+                return                                   # 继续等
+            pc = unreal.GameplayStatics.get_player_controller(w, 0)
+            pawn = unreal.GameplayStatics.get_player_pawn(w, 0)   # ← 最可靠的取 pawn 途径
+            ...                                          # 校验/采样/写盘 → finish()
+    finally:
+        S["busy"] = False
+
+handle = unreal.register_slate_post_tick_callback(tick)
+```
+
+**收尾**：`unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_request_end_play()`，
+再 `unreal.SystemLibrary.quit_editor()`（拿不到就走启动器的 PID 兜底杀）。
+
+**四条实测要点**：
+
+1. **`editor_play_simulate()` ≠ `editor_request_begin_play()`**：前者是 Simulate（给你 SpectatorPawn、
+   不生成玩家 pawn），要"有玩家 pawn 的 PIE"必须用后者；`is_in_play_in_editor()` 用来判状态。
+2. **void 返回不是失败**：`editor_request_begin_play()` 返回 `None` —— 把 "returned None" 当失败写进探测报告，
+   会让你以为"PIE 没起来"而在下一次会话里白等（本项目实测白等 120 s）。判据应是"**没抛异常**"。
+3. **接受一个"找到的对象"前，先要求它四件套齐备**（网格 / 弹簧臂 / 相机 / 胶囊等按任务定）：
+   否则 SpectatorPawn、代理 pawn、空 pawn 都会被你当成目标，后面全部字段变 None。
+   实测做法：候选来源按序尝试（`GameplayStatics.get_player_pawn` → `PC.call_method("K2_GetPawn")` → …），
+   每个候选都做"组件齐备性"检查，**接受第一个齐备的**，并把这个来源名写进报告。
+4. **写盘要有存在性硬判**（`os.path.isfile` + 非空 + 断言），并且**每次相位结束时增量落盘**：
+   Python 里抛异常时 UE 进程仍可能 exit=0，"我写了 JSON"不能靠返回值相信。
+
+**"哪些量只能从 PIE 拿"**：相机世界变换、网格组件世界变换（component space 的参考系）、
+角色的实时速度/是否着地、资产运行期尺度与胶囊参数 —— 这些在编辑器（非 PIE）里读不到或读到的是默认值。
+
+## 2026-10-06 补充：**在用户开着的编辑器里**用组播远程执行跑多轮 PIE（不重启编辑器）
+
+- 入口：`python reference/ue_pyexec.py "<代码>" --timeout 240`
+  （MCP 没起也能用；长代码自动写临时文件走 `ExecuteFile`；`print` 会回传到客户端）。
+- 脚本里 `unreal.register_slate_post_tick_callback(tick)` 注册的状态机会**在本次调用返回后继续在编辑器里跑**，
+  所以"两轮 PIE（改前测 → 改 → 改后测）"可以一次发射完成，结果写文件轮询读取。**必须有 420s 看门狗**，
+  超时也要把已有结果写盘（否则一次卡死 = 报告全丢）。
+- **先保存用户的 session 再动手**：`EditorLoadingAndSavingUtils.get_dirty_map_packages()` →
+  `set_current_level_by_name(<L>)` + `save_current_level()` 逐个保存（当天就是这样先落盘了用户手动删白盒的
+  Level1/Level2/Level3，`dirty=[]` 之后才改东西）；改前/改后各拷一份磁盘地图做双备份。
+- **三个当天踩到的状态机坑**：
+  1. **跨轮不能复用 Pawn 句柄**：`editor_request_end_play()` 后旧 Pawn 已销毁，下一轮再 `set_actor_location`
+     会抛 `GSRollingBallPawn: Internal Error - ObjectInstance is null!`，被 try 吞掉 → 每帧空转直到看门狗。
+     **每次进入新一轮 PIE 都要 `pawn = None` 重新取。**
+  2. **`end_play()` 之后不要立刻枚举世界/保存**：世界还在 teardown，`get_all_level_actors()` 返回空、
+     `save_current_level()` 返回 False（当天因此"销毁 0 个代理"。等 4~5s 或先 `load_level` 再等 2s）。
+  3. **同一脚本被跑两次会重复建对象**（代理/玩家起点）：写入前先按标签查重。
+- **真实小球 > 射线**：地板/碰撞验收用"传送真实 Pawn + 等 1.25s + 看 z"，判据 `z < 起点-260` 记为掉；
+  射线（哪怕 `ECC_PHYSICS_BODY=BLOCK`）**不能**证明滚球踩得住（平面网格只有复杂碰撞时会穿过）。
+- 用户在场时 PIE 会占用他的视口：跑短一点（每点 1.25s、一轮 ≤20 点），跑完 `end_play` 把界面还回去。

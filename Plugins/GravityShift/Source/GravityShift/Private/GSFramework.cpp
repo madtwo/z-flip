@@ -3,7 +3,10 @@
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerStart.h"
+#include "Kismet/GameplayStatics.h"
 
 #include "GSGravityManager.h"
 #include "GSLandingResponseComponent.h"
@@ -63,6 +66,38 @@ void AGSGravityGameMode::EnsureCoreManagers()
 	{
 		StateManager->ApplyLevelGravityConfig();
 	}
+}
+
+AActor* AGSGravityGameMode::ChoosePlayerStart_Implementation(AController* Player)
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return Super::ChoosePlayerStart_Implementation(Player);
+	}
+
+	// Keep spawn selection deterministic when Main streams Level1/Level2 and all of
+	// them contain their own PlayerStart.  Each start is tagged with the persistent
+	// map it belongs to: Main / Level1 / Level2 / ... .
+	// GetCurrentLevelName(..., true) strips the PIE prefix (UEDPIE_0_, etc.).
+	const FString PersistentMapName = UGameplayStatics::GetCurrentLevelName(this, true);
+	const FName DesiredTag(*PersistentMapName);
+
+	for (TActorIterator<APlayerStart> It(World); It; ++It)
+	{
+		APlayerStart* Start = *It;
+		if (IsValid(Start) && Start->PlayerStartTag == DesiredTag)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[GravityShift] PlayerStart '%s' selected for map '%s'"),
+				*Start->GetName(), *PersistentMapName);
+			return Start;
+		}
+	}
+
+	UE_LOG(LogTemp, Warning,
+		TEXT("[GravityShift] No PlayerStart tagged '%s'; falling back to GameModeBase selection"),
+		*PersistentMapName);
+	return Super::ChoosePlayerStart_Implementation(Player);
 }
 
 void AGSGravityGameMode::HandleStartingNewPlayer_Implementation(APlayerController* NewPlayer)

@@ -111,6 +111,10 @@ AGSRollingBallPawn::AGSRollingBallPawn()
 	Camera->bUsePawnControlRotation = false;
 
 	GravityBody = CreateDefaultSubobject<UGSGravityBodyComponent>(TEXT("GravityBody"));
+
+	// 2026-10-07 手感加重（用户反馈"太轻飘飘、容易飞起来"）：小球自身重力 2×
+	// 只影响球（方块自己的 GravityScale 在 GSBlockBase 里，不受影响）
+	GravityBody->GravityScale = 5.0f;
 	SurfaceReceiver = CreateDefaultSubobject<UGSSurfaceReceiverComponent>(TEXT("SurfaceReceiver"));
 	LandingResponse = CreateDefaultSubobject<UGSLandingResponseComponent>(TEXT("LandingResponse"));
 	Resettable = CreateDefaultSubobject<UGSResettableComponent>(TEXT("Resettable"));
@@ -124,6 +128,15 @@ void AGSRollingBallPawn::BeginPlay()
 	Super::BeginPlay();
 
 	RefreshSystemReferences();
+
+	// 进玩法就直接抓鼠标(GameOnly + 藏光标):否则光标会划出游戏视口、一点回来编辑器就抢走焦点。
+	// 主菜单流程由 GSMenuWidgets 自己设 UIOnly/显示光标,关闭菜单时它设回 GameOnly —— 与这里一致。
+	// (菜单地图没有球,不会走到这里,所以两条路径不会打架。)
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		PC->SetInputMode(FInputModeGameOnly());
+		PC->bShowMouseCursor = false;
+	}
 
 	// 用户灵敏度设置:开局读一次存档缓存到成员里,轮询每帧用缓存,不碰磁盘。
 	MouseSensitivityMultiplier = UGSSettingsSaveGame::LoadOrCreate()->MouseSensitivityMultiplier;
@@ -941,14 +954,30 @@ void AGSRollingBallPawn::UpdateCamera(float DeltaSeconds)
 		// 已处于安全范围:按"驻留 + 限速"平滑放长到 SafeArm(未满臂时同样适用)。
 		// 棱边探针逐帧翻转(命中帧不断把驻留清零)在此被去弹,不会来回抽。
 		ProbeClearSeconds += DeltaSeconds;
-		// 瞄准解除后的 1.2s 内走"快速回弹":不等 0.7s 驻留、放长速度 ×3,
+		// 瞄准解除后的 1.2s 内走"快速回弹":不等驻留、放长更快,
 		// 松开右键后视线一离开天花板/墙就立刻回到正常距离。
 		const bool bFastExtend = GetWorld() && GetWorld()->GetTimeSeconds() < FastArmExtendUntilSeconds;
-		if (ProbeClearSeconds > (bFastExtend ? 0.0f : ArmExtendHoldSeconds))
+		// —— 2026-10-07(用户反馈"下楼梯镜头明显抽插振动")——
+		// 旧实现:驻留 0.7s 后 FInterpTo(按比例)放长。按比例插值起步极快(缺口越大越快,
+		// 大 dt 时一帧就走掉大半),配上"命中立即压入"的瞬收,一次"抽出→戳入";台阶上
+		// 每级台阶重复一次就是抽插感(实测一帧从 384 → 82,再弹回)。改法:
+		//  ① 放长改**线性限速**(cm/s),不再按比例;dt 上限 50ms,低帧率下也不会一大步蹦出去;
+		//  ② 只在障碍比当前臂多出 ArmExtendMarginCm 时才放,且放到"障碍−余量"就停——不去
+		//     贴边(贴边下一帧必然又命中,就是"戳入");
+		//  ③ 驻留时间放宽到 ArmExtendHoldSeconds × ArmExtendHoldScale,台阶那种"命中间隔
+		//     一两秒"的节奏直接不触发放长,臂稳定在短位。
+		// 防穿模的"命中立即压入"(上面的 if 分支)一字未动。
+		static constexpr float ArmExtendMarginCm = 25.0f;      // 放长余量:不贴障碍边
+		static constexpr float ArmExtendCmPerSec = 400.0f;     // 常速放长(线性)
+		static constexpr float FastArmExtendCmPerSec = 900.0f; // 瞄准解除后的快速回弹
+		static constexpr float ArmExtendHoldScale = 2.0f;      // 驻留倍数(0.7s → 1.4s)
+		const float HoldSeconds = bFastExtend ? 0.0f : ArmExtendHoldSeconds * ArmExtendHoldScale;
+		const float ExtendCeilCm = SafeArmCm - ArmExtendMarginCm;
+		if (ProbeClearSeconds > HoldSeconds && ExtendCeilCm > SmoothedArmLengthCm)
 		{
-			SmoothedArmLengthCm = FMath::FInterpTo(SmoothedArmLengthCm, SafeArmCm, DeltaSeconds,
-				bFastExtend ? FMath::Max(ArmLengthInterpSpeed * 3.0f, 12.0f)
-					: FMath::Max(ArmLengthInterpSpeed, 0.1f));
+			const float StepDt = FMath::Clamp(DeltaSeconds, 0.0f, 0.05f);
+			const float ExtendCmPerSec = bFastExtend ? FastArmExtendCmPerSec : ArmExtendCmPerSec;
+			SmoothedArmLengthCm = FMath::Min(SmoothedArmLengthCm + ExtendCmPerSec * StepDt, ExtendCeilCm);
 		}
 	}
 	CameraArm->TargetArmLength = SmoothedArmLengthCm;
@@ -1725,6 +1754,72 @@ void AGSRollingBallPawn::PollNativeInput()
 	bSpeedUpKeyWasDown = bSpeedUpDown;
 }
 
+// 卡死救援(2026-10-07 用户反馈 V10/V13 圆弧处"还是会卡"):球有时会从美术网格的开口钻进
+// 比它直径还窄的空腔,物理解算推不出来 —— 判定转了也没用,玩家就是推不动。
+// 只在三条同时成立、并持续 TriggerSeconds 时才动:①玩家在推/正在骑行 ②球速≈0
+// ③球体内芯(0.6R)与世界几何**重叠**(被埋的特征;正常顶墙只有表面接触,内芯是空的)。
+// 动作只有一次位移:沿"来路"(最近一次没被埋的位置)顶出 1.5R,再带一点向上分量。
+void AGSRollingBallPawn::UpdateStuckRescue(float DeltaSeconds)
+{
+	UWorld* World = GetWorld();
+	if (!World || !BallCollision)
+	{
+		return;
+	}
+	const FVector Loc = BallCollision->GetComponentLocation();
+	const float Radius = BallCollision->GetScaledSphereRadius();
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(GSStuckRescue), false, this);
+	Params.AddIgnoredActor(this);
+
+	// 用 0.85R 的探测球:球表面插进网格 ≳7.5cm 时判为"被埋"(实测卡死点插进 10cm);
+	// 正常贴墙/压墙时球面只是接触(重叠 0),不会误报。
+	const bool bBuried = World->OverlapAnyTestByChannel(
+		Loc, FQuat::Identity, ECC_Visibility, FCollisionShape::MakeSphere(Radius * 0.85f), Params);
+	if (!bBuried)
+	{
+		LastSafeLocation = Loc;
+		bHasLastSafeLocation = true;
+		StuckBuriedSeconds = 0.0f;
+		return;
+	}
+
+	const float SpeedCm = BallCollision->GetPhysicsLinearVelocity().Size();
+	// 被埋本身就是坏状态(球芯插进网格里),不需要玩家在推也有意义;但仍要求"停住"，
+	// 避免把高速穿模的那一两帧误当卡死(那种情况物理解算自己能处理)。
+	if (SpeedCm > 25.0f)
+	{
+		StuckBuriedSeconds = 0.0f;
+		return;
+	}
+
+	StuckBuriedSeconds += DeltaSeconds;
+	const double Now = World->GetTimeSeconds();
+	static constexpr float TriggerSeconds = 0.55f;
+	static constexpr float CooldownSeconds = 1.2f;
+	if (StuckBuriedSeconds < TriggerSeconds
+		|| (LastStuckRescueTime >= 0.0 && Now - LastStuckRescueTime < CooldownSeconds))
+	{
+		return;
+	}
+
+	FVector Dir = bHasLastSafeLocation ? (LastSafeLocation - Loc) : FVector::ZeroVector;
+	Dir.Z += Radius * 0.5f;
+	if (!Dir.Normalize())
+	{
+		Dir = -GravityRedirectCurrent;
+		if (!Dir.Normalize())
+		{
+			Dir = FVector::UpVector;
+		}
+	}
+	const FVector Target = Loc + Dir * (Radius * 1.5f);
+	SetActorLocation(Target, false, nullptr, ETeleportType::TeleportPhysics);
+	StuckBuriedSeconds = 0.0f;
+	LastStuckRescueTime = Now;
+	UE_LOG(LogTemp, Log, TEXT("[GSStuckRescue] buried=1 speed=%.0f from=(%.0f,%.0f,%.0f) to=(%.0f,%.0f,%.0f)"),
+		SpeedCm, Loc.X, Loc.Y, Loc.Z, Target.X, Target.Y, Target.Z);
+}
+
 void AGSRollingBallPawn::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
@@ -1733,6 +1828,8 @@ void AGSRollingBallPawn::Tick(float DeltaSeconds)
 	UpdateGravityRedirect(DeltaSeconds);
 	// 特殊滑梯吸附同理:先推进吸附(它自己驱动速度),再走移动/相机。
 	UpdateFaceCapture(DeltaSeconds);
+	// 卡死救援:被埋进美术空腔时把球顶出来(正常玩法不触发,见函数注释)。
+	UpdateStuckRescue(DeltaSeconds);
 
 	if (bInputLocked)
 	{
@@ -1928,7 +2025,8 @@ void AGSRollingBallPawn::UpdateAiming()
 		}
 	}
 
-	// 锁定方块时左键 = 掉下来 ↔ 升起来。
+	// 锁定方块时左键 = 掉下来 ↔ 升起来(与老蓝图逐字节一致的原始行为;2026-10-06 曾试加
+	// "水平瞄→朝墙"分支,用户明确否决:方块必须保持原本的上下切换,已撤销)。
 	const bool bFireDown = PC->IsInputKeyDown(AimFireKey);
 	if (bFireDown && !bAimFireKeyWasDown && AimedBlock)
 	{

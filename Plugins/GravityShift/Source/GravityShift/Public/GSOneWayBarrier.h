@@ -18,7 +18,7 @@ class UBoxComponent;
  * 用法:拖到平台边缘,把 OutwardDirection 指向"掉下去的那一侧",盒子盖住那一条边即可
  * (盒子本身无碰撞,只在编辑器里显示线框)。
  */
-UCLASS(DisplayName = "GS One Way Barrier", Category = "GravityShift")
+UCLASS(Blueprintable, BlueprintType, DisplayName = "GS One Way Barrier", Category = "GravityShift")
 class GRAVITYSHIFT_API AGSOneWayBarrier : public AActor
 {
 	GENERATED_BODY()

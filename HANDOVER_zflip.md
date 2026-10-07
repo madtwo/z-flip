@@ -3168,3 +3168,82 @@ Pawn 侧关键接口节选(行号脚本实测)、关卡现状参数表、本机�
 - **未推送的东西**:`Content/_GENERATED/20625/*`(本机建模调试产物)与 `Config/DefaultEditor.ini`(编辑器噪音)一律排除。
 
 ---
+
+## 67. 2026-09-29 倒角弧改**双向**（摆设方向驱动）+ 新图里重新接线
+
+用户要求（原话）："那个特殊的倒角圆弧 现在我要求做成两边都行 两边都能换重力 是双向的 而且类似普通圆弧 会根据摆放方向有不同重力转化效果 人眼视觉看着就是球顺着圆弧过去就到圆弧连接的另一个垂直面上"。
+
+**先说结论：这算法用户早就写过** —— `UGSRedirectorComponent`（`Plugins/GravityShift/Source/GravityShift/Public/GSRedirectorComponent.h`）头注释写着"**双向生效**：球从任一面进入都会滑到另一面——入口面由球当前重力自动识别，出口就是另一面"，还带 `bAllowEntryFromA/bAllowEntryFromB`、`EntryLipBandCm`（只认圆弧接地那块）、`MaxLateralNormalDot`（撞侧面不触发）、`bRequireSupportToTrigger`（悬空擦过不触发）。本次是把**同一条规则搬进体积**（因为当初是体积+吸附才解决了"碰到了不转重力"）。
+
+**代码改动**（`AGSOneWayGravityRedirectVolume`，标记为 2026-09-29 项目侧扩展）：
+- 新增 `bBidirectional`(默认 **true**)、`LocalGravityADirection`(默认 -Z)、`LocalGravityBDirection`(默认 +X)、`TwoWayPerpendicularTolerance`；
+- `ResolveTwoWayGravity()`：哪一面的重力与球当前重力匹配就从那面进、出口是另一面；两面都不匹配 → fail-closed 不触发；两面不垂直 → 不触发；
+- 吸附 `UpdateArcAssist` 在双向模式下接受**任一面**（吸附本身不转重力）；
+- 单向模式(`bBidirectional=false`)与专家补丁的字段/行为**一字未动**；我 09-26 的"瞬时转重力"修正保留（日志里 `fired#N(instant,two-way)`）；
+- ★ Python 属性名规则（踩过两次）：`bXxx` → `xxx`；`LocalGravityADirection` → `local_gravity_a_direction`（字母与 Direction 之间**有下划线**）。
+- 编译：`Build.bat ZFlipEditor Win64 Development -Project=...` → Result: Succeeded（2026-09-29）。
+
+**关卡**：队友 09-28 那版 `Re_Blockout` 里**没有任何重定向实例**（`GSRedirectorComponent` 与体积都没有），我旧图里那块落球平台(y≤-1345)也**已经不在**。按实测几何重新摆了一个：
+- 实测（射线剖面，x=3500/3600/3700）：三个弧 = x∈[3400,3700] 的**横梁**，剖面 y∈[-1300,-1200]、z∈[-600,-500]，圆角在 **+Y 侧**(y=-1200)，梁顶 z=-500；y>-1200 是**坑**（坑底 z≈-1284），y<-1320 无支撑面。
+- 新 actor `TwoWayRedirect_ArcRail` @ (3550,-1250,-500)，TriggerBox extent (180,90,80) → x∈[3370,3730] y∈[-1340,-1160] z∈[-580,-420]；ArcAssistBox 相对 (0,50,-40) extent (180,60,70)；
+- A = -Z（梁顶）、B = -Y（梁的 +Y 侧面）；`debug_log=true`。**已保存关卡**。
+
+**PIE 实测（同一会话，体积日志为证）**：
+```
+armed mode=two-way A=(0,0,-1) B=(0,-1,0) center=(3550,-1250,-500)
+fired#1 t=0.810 current=(0,0,-1) entryDot=1.000 target=-Y     ← 梁顶 → 侧面
+fired#2 t=2.893 current=(0,-1,0) entryDot=1.000 target=-Z     ← 侧面 → 梁顶（反向）
+fired#3 t=6.560 current=(0,0,-1) entryDot=1.000 target=-Y     ← 又正向
+```
+⇒ **两个方向都触发、都换重力**，`entryDot=1.000`（入口识别精确）。
+
+**★留给用户/关卡的观察**：转换后球朝 -Y 飞出去（采样 y 一直跑到 -2420，z 从 -520 升到 -283），是因为**队友这版图 -Y 侧没有落脚面**（旧平台已被删）；另外球**停在梁顶点上就会被触发**（触发区覆盖梁顶，体积没有速度门）。要不要收紧触发区/要不要在 -Y 侧补落脚面，由用户定。
+
+**回退**：删 actor `TwoWayRedirect_ArcRail`（或 `bEnabled=false`）；代码回退 = 把 `bBidirectional` 置 false（单向）或按上面的标记删掉新增段落。脚本：`_workbuddy/zflip_place_twoway_arc.py`(摆放)、`zflip_twoway_arc_pie.py`(双向 PIE)、`zflip_arc_profile.py`(几何剖面)。
+
+## 68. 2026-09-29 晚：专家 v3 补丁落地 + 队友 push 弄丢的 17 个转向器还原 + 提问包 v2
+
+### 68.1 代码（v3 已落地并编译）
+- 按 `zflip_bidirectional_arc_v3_20260929` 的**增量补丁**（`...from_project_20260929.patch`）应用到工作区，
+  两个文件与包内 `replacement/` 逐字节一致（仅 CRLF/LF 差异）：
+  `GSOneWayGravityRedirectVolume.h` sha256 `ae809339...`、`.cpp` `700b095f...`。
+- 新增入口门 `PassesTwoWayEntryGates`（speed>=20 / support / arc-contact(24 射线命中名字含
+  `Blockout_Corner_Curved` 的 actor，间距<=20) / side<=0.70 / arc-face / **arc-progress: dot(ContactNormal,ExitUp)>=0.20** / approach>=20），
+  单向模式不受影响；`GetWorldArcAssistAxis()` 在双向模式下按 **Actor 局部轴**解释；瞬时提交（Begin 后立刻 End）保留。
+- 编译：`Build.bat ZFlipEditor Win64 Development` -> Succeeded；DLL `f368553f...`（1,199,104 B）。
+- 包内静态契约测试 `verify_patch_contract.py` 对**本机实文件**通过。
+
+### 68.2 地图：队友 push 把 17 个 `UGSRedirectorComponent` 全弄丢了 -> 已还原并保存
+- 证据：当前 umap 里 `"Redirector"` 字样 0 次；覆盖前本机备份（`_sync_backup/18b8d489`、
+  `_local_only_backup_20260928`）里 1 次，且脚本读出 **17 个实例**（含用户点名的 `SM_LDI_Gravityshift_11/12`，
+  地板层 (3750,-1150,-1250)/(3850,-1150,-1250)，A=-Z / B=-Y，`face_capture_mode=false`）。
+- 还原法：以覆盖前备份地图为参照，`SubobjectDataSubsystem.add_new_subobject` 补 `GSRedirectorComponent`，
+  41 个 EditAnywhere 属性逐个回填（枚举 str() 形如 `<GSGravityDirection.NEGATIVE_X: 1>`，要 strip `<>` 再取名字），
+  **回读 0 处不一致 -> 保存**（21:26，umap sha256 `f30ece59...`）。脚本 `_workbuddy/zflip_v3_restore_redirectors.py`。
+- 注意：`get_actor_bounds(False)` 会把 128 半径的辅助组件算进去（盒子尺寸因此算错过一次）；
+  **collider-only 实测**才是真值。
+
+### 68.3 关卡摆放：三次尝试全部未落盘（关键实测结论已修正）
+- 原弧真实旋转是 **pitch 90 / yaw 0**（不是 yaw 90），世界 AABB = 每段 X∈[loc.x-100,loc.x]、Y∈[loc.y,loc.y+100]、Z∈[loc.z,loc.z+100]；
+  局部帧 = X∈[-100,0]、Y∈[0,100]、Z∈[-100,0]，弧面 = 局部 (X,Y) 平面 1/4 圆 R=100、圆心 = actor 原点。
+- 地板 `Blockout_Box15` 的**碰撞盒实测**：中心 (3550,-950,-1292)、半尺寸 (150,150,8) -> 顶面 **-1284**、
+  -Y 边缘 **-1100**、X 覆盖 [3400,3700]（旧笔记的 -1292 / -1250 是含辅助组件的错读数）。
+- 修正后的候选（**未落盘**，待专家 Q1 裁定）：复制三段弧 loc=(3400+100i, -1100, -1384)、
+  rot=(0,**90**,180)、scale=1 -> 顶切面 = 地板面且切线 = 地板边缘；补立面 X∈[3400,3700] Y∈[-1200,-1100] Z∈[-2584,-1384]；
+  体积根 (3550,-1175,-1309)；PlayerStart (3450,-900,-1234) yaw -90。**原件三段一律不动。**
+- 三次尝试的教训写进提问包 `04_尝试与失败记录_候选摆放.md`。
+
+### 68.4 交付物：提问包 v2（自包含）
+- `D:\下载\zflip_双向弧_提问包v2_20260929.zip`，sha256 `2e9b9bce1f40ee18f27977a086cc6e3d0c1acd2d8dd0e5885592c0dad0e093ca`，
+  3,501,908 B / 61 entries（7 文档 + 2 图 + 20 证据 + 10 脚本 + 20 源码 + MANIFEST），
+  双读者校验：内部 MANIFEST 60/60 全对、PowerShell 哈希与 sidecar 一致。
+- 问题 Q1 弧的精确摆放 / Q2 机制归属（v3 体积 vs `UGSRedirectorComponent` 面吸附）/ Q3 为何不触发与取证手段 /
+  Q4 触发盒参数 / Q5 反向验收调用 / Q6 baseline。
+- 旧包 `zflip_双向倒角圆弧_提问包_20260929.zip` 原样保留（归档，未删）。
+
+### 68.5 状态与回退
+- 编辑器已关闭；关卡无未保存改动；`Content/Maps/` 里没有我放的临时件（参照副本已移到
+  `D:\UE\_local_only_backup_20260929_v3pre\Re_Blockout_REF.umap`）。
+- 代码回退：`D:\UE\_local_only_backup_20260929_v3pre\GSOneWayGravityRedirectVolume.{h,cpp}` 覆盖回去再重编。
+- 地图回退：17 个转向器的还原动作 = 保存于 21:26 的那次；要退到覆盖前的地图用
+  `_sync_backup/18b8d489/Content__Maps__Re_Blockout.umap`（会一起丢掉还原）。**没有推送任何东西。**

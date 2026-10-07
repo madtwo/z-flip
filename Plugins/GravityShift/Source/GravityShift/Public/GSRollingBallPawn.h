@@ -791,6 +791,16 @@ public:
 
 protected:
 	FVector2D MoveInput = FVector2D::ZeroVector;
+
+	// ---- 卡死救援(2026-10-07:V10/V13 等圆弧处球被埋进美术网格空腔,物理解算推不出来) ----
+	// 判据:玩家在推/正在骑行 + 球速≈0 + 球体内芯(0.6R)与世界几何**重叠**(被埋;正常顶墙
+	// 只有表面接触、内芯是空的),三者同时成立并持续一小段时间 → 沿"来路"把球顶出 1.5R。
+	// 只做一次位移,不改重力/骑行状态。
+	float StuckBuriedSeconds = 0.0f;
+	double LastStuckRescueTime = -1.0;
+	FVector LastSafeLocation = FVector::ZeroVector;
+	bool bHasLastSafeLocation = false;
+	void UpdateStuckRescue(float DeltaSeconds);
 	FVector CurrentCameraUp = FVector::UpVector;
 	FVector TargetCameraUp = FVector::UpVector;
 	FQuat CurrentCameraRotation = FQuat::Identity;

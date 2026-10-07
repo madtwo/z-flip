@@ -400,28 +400,26 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		return;
 	}
 
-	// **撞侧面不触发**:接触面法线沿"滑梯宽度方向"(弯道轴) → 撞的是滑梯侧壁(平直面),
-	// 不是正面圆弧。用户要求:撞侧面不要动,只有正面圆弧接地那块才触发。
+	// ===== 2026-10-07 用户拍板:"碰到了就触发转化动画" =====
+	// 接触本身即触发。从这里的 gate[side] 起,到下面的 gate[lip] / gate[airborne] /
+	// gate[separating] / gate[speed] / gate[align],全部降级为**诊断日志**:照旧逐帧评估并
+	// 打印 gate[...](便于回看球是以什么姿态碰上的),但一律不再 return、不再拦触发。
+	// 触发方向仍由"球当前重力落在 A/B 哪一面"决定(gate[face]/gate[entryside] 保留)。
+	// 要恢复旧的串门行为:把下面每处 GateLog 后注释掉的那行 return 放回来即可。
 	const float NormalAxisDot = FMath::Abs(FVector::DotProduct(ContactNormal, BendAxis));
 	if (NormalAxisDot > MaxLateralNormalDot)
 	{
-		GateLog(TEXT("side"), ExitDir, NormalAxisDot, true);
-		return;
+		GateLog(TEXT("side"), ExitDir, NormalAxisDot, true);   // 撞侧面:只记录,不再拦
 	}
 
-	// **只有贴在内弧面上才触发**(2026-09-25 用户要求,见头文件 bRequireInnerArcFace):
-	// 接触法线必须落在"入口面法线 ↔ 出口面法线"的内侧象限。球贴的是滑梯**背面/外底面**
-	// (凸面那一侧)时,法线与两个面法线同时反向 → 拒;骑在弧面上时法线在两面之间连续转动 → 通过。
-	// 这条与上面的 gate[side](左右侧壁)互补:一个治"背面",一个治"侧面",合起来就是
-	// 用户要的"只有弧面才转重力"。
+	// 贴背面/外底面(内弧面门):只记录,不再拦。
 	if (bRequireInnerArcFace)
 	{
 		const float InnerEntryDot = FVector::DotProduct(ContactNormal, EntryUp);
 		const float InnerExitDot = FVector::DotProduct(ContactNormal, ExitUp);
 		if (InnerEntryDot < -ArcFaceNormalTolerance || InnerExitDot < -ArcFaceNormalTolerance)
 		{
-			GateLog(TEXT("arcface"), ExitDir, InnerEntryDot, true);
-			return;
+			GateLog(TEXT("arcface"), ExitDir, InnerEntryDot, true);   // 只记录,不再拦
 		}
 	}
 
@@ -440,22 +438,16 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	const float Radius = BallSphere->GetScaledSphereRadius();
 	if (DistToLipCm > Radius + EntryLipBandCm)
 	{
-		GateLog(TEXT("lip"), ExitDir, DistToLipCm, true);
-		return;
+		GateLog(TEXT("lip"), ExitDir, DistToLipCm, true);   // 只记录,不再拦
 	}
 
-	// **"真的骑在面上"加固(2026-09-13 用户反馈)**:擦过/弹开/空中掠过不应触发。
-	// ①支撑门:球必须在支撑态且悬空时长 ≤ MaxAirborneSecondsForTrigger——滑地/滑墙
-	//   进入的球"骑在面上";从墙沿掉下来、空中飞过时擦到滑梯的球则是悬空的。
-	// ②分离门:球相对接触面的速度不能朝"离开滑梯"方向过大(刚被边缘弹开的球,速度
-	//   沿接触法线朝外)。用户误触发那次球是悬空脱离墙面的:vIn 含 +341cm/s 离面分量。
+	// 支撑门/分离门:只记录,不再拦(碰到了就触发)。
 	if (bRequireSupportToTrigger && Ball->LandingResponse)
 	{
 		const float AirborneSec = Ball->LandingResponse->GetAirborneSeconds();
 		if (!Ball->LandingResponse->IsSupported() || AirborneSec > MaxAirborneSecondsForTrigger)
 		{
-			GateLog(TEXT("airborne"), ExitDir, AirborneSec, bTouch);
-			return;
+			GateLog(TEXT("airborne"), ExitDir, AirborneSec, bTouch);   // 只记录,不再拦
 		}
 	}
 	if (bRejectSeparatingContact)
@@ -463,26 +455,20 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		const float SepSpeedCm = FVector::DotProduct(Velocity, ContactNormal);
 		if (SepSpeedCm > SeparationRejectSpeedCm)
 		{
-			GateLog(TEXT("separating"), ExitDir, SepSpeedCm, bTouch);
-			return;
+			GateLog(TEXT("separating"), ExitDir, SepSpeedCm, bTouch);   // 只记录,不再拦
 		}
 	}
 
-	// 静止球不触发。
-	if (Speed < MinTriggerSpeedCm)
+	// 速度门/方向门:只记录,不再拦(碰到了就触发)。
+	const float RetreatSpeedCm = FVector::DotProduct(Velocity, ExitDir);
+	if (Speed < MinTriggerSpeedCm && RetreatSpeedCm < -SlowEntrySpeedCm)
 	{
-		GateLog(TEXT("speed"), ExitDir, 0.0f, true);
-		return;
+		GateLog(TEXT("speed"), ExitDir, RetreatSpeedCm, true);   // 只记录,不再拦
 	}
-
-	// 方向判定:速度必须大体朝出口方向(入口行进方向 = 出口重力方向,正反通用);
-	// 只有"几乎停住"的球(速度 < SlowEntrySpeedCm,反向下滑常被滑梯顶停)才豁免,
-	// 否则"侧面撞进来 / 在滑梯里弹跳"的球也会被当成进入。
 	const float Align = Speed > 1.0f ? FVector::DotProduct(Velocity / Speed, ExitDir) : 0.0f;
 	if (Speed >= SlowEntrySpeedCm && Align < EntryAlignmentMin)
 	{
-		GateLog(TEXT("align"), ExitDir, Align, true);
-		return;
+		GateLog(TEXT("align"), ExitDir, Align, true);   // 只记录,不再拦
 	}
 
 	// 入口速度整理:侧向(垂直弯道平面)分量按比例清掉;前向速度作为滑行速度
