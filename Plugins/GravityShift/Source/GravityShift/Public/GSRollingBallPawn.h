@@ -335,7 +335,7 @@ public:
 	// 逐帧楼梯诊断日志(默认关):打印 在楼梯上/空中/位置/速度 —— 楼梯"飞"是**亚秒级**弹跳,
 	// 0.5s 级采样看不到,只能靠逐帧日志定位(见 PIE_TESTING 的"逐帧数据"章)。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Debug")
-	bool bStairDebugLog = true;
+	bool bStairDebugLog = false;
 
 	// 离开楼梯后"端点外一小块"的固定小吸附(见下方端点延续说明)。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
@@ -346,107 +346,6 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
 	float StairStickEndSeconds = 0.5f;
-
-	// ================= 楼梯判定 + 分向辅助(2026-10-07 用户需求)=================
-	// "小球在上/下楼梯时**先判断**,再给辅助效果。"
-	//
-	// 判定只问一句话:**球此刻是在往上爬,还是在往下/平着走?**
-	// 一个布尔量就把两个相反的要求彻底分开:
-	//   在爬(bClimbAhead) —— 关防飞、开爬坡助力、重力用 StairGravityScale(保住弹跳)
-	//   在守            —— 三件套全开(限速/削法向/削上抛)、关助力、重力用 profile 的 GravityScale
-	//
-	// **信号用平滑后的垂直速度趋势(StairVzTrendCm),不用前方探针** —— 2026-10-07 PIE 实测:
-	// 上一版拿"固定 120cm 外的一条射线"当前方地形,我当时的判断是"几何事实不会抖"。错了 ——
-	// 方块地形上那条射线逐帧落在踏面/立面/缝隙的不同位置:622 帧日志里 climb 翻了 84 次、
-	// 中位持续 **3 帧**(约 50ms)。门跟着抖 → 防飞时开时关 → **爬不上去也防不住飞**。
-	// 同样这段日志换成趋势后只有 22 次翻转、中位持续 28 帧。
-	//
-	// 趋势这一个量同时覆盖四种情况,这是它比探针强的根本原因:
-	//   爬坡 → 趋势为正 → 助力开、防飞关
-	//   坡顶 → 趋势自然衰减到 0 → 防飞接管,**球被按在顶面而不是抛出去**(用户报的"上完楼梯飞出去")
-	//   下坡 → 趋势为负 → 防飞全开(用户报的"下楼梯时飞出去")
-	//   平地 → 趋势≈0 → 防飞开 = 顺手把球贴在地上
-	// 探针只在需要**量**的时候用(助力的目标速度与坡角)。量有噪声无所谓,它只是个力。
-	//
-	// 附:为什么两个要求本来是矛盾的 —— 爬上需要 v ≥ √(2·g·h)/sinθ(把水平速度转成垂直速度),
-	// 下台阶需要 v ≤ d·√(g/(2h))(离开边缘后是平抛,快了就跳过台阶=飞出去)。两式相除 g 约掉,
-	// 判据纯几何:d > 2h/sinθ。所以必须有"爬/守"这个开关,没有一根固定旋钮能同时满足。
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement")
-	bool bStairAssistEnabled = true;
-
-	// 沿重力反方向的垂直速度趋势(cm/s)高过这个值才算"在爬"。45° 坡上 370cm/s 时该值约 260,
-	// 平地滚动时在 0 附近摆 —— 40 两边都留足了余量。
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement")
-	float StairTrendAscendCm = 40.0f;
-
-	// ---- 前探针:**只用来量落差**,不参与判定(判定见上),所以抖动无害 ----
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
-	float StairAheadProbeCm = 120.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "10.0"))
-	float StairAheadProbeDepthCm = 400.0f;
-
-	// ---- 爬坡助力(要求:能爬上楼梯)----
-	// 爬台阶的瓶颈在**弹跳间隙**:球上台阶时一半时间是腾空的,而那时驱动只剩
-	// AirControlAccelerationCm(默认 900),远不够翻过下一级。所以助力只做一件事——
-	// 在爬(bClimbAhead)且沿坡速度不足时,沿坡向补一个加速度,把速度顶到
-	// StairClimbSpeedFactor × √(2·g_s·前方台阶高)。**到速度立刻不推**,是补差不是常驻推力,
-	// 所以平地/下坡完全不受影响。0 = 关闭助力。
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
-	float StairClimbAssistAccelCm = 2600.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
-	float StairClimbSpeedFactor = 1.25f;
-
-	// 前方落差小于这个值时不当"台阶"处理(平地/缓坡不触发);也是 √ 里的下限。
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.1"))
-	float StairClimbMinHeightCm = 6.0f;
-
-	// ---- 防飞三件套:把原来只给"点名楼梯"用的那套推广到**所有**楼梯件 ----
-	// StairStickBoost* 那三个值仍归点名楼梯;这三个是其它楼梯的对应值。
-	// 只在"守"的状态生效(bClimbAhead == false),爬坡时全关,所以对爬坡零影响。0 = 该项关闭。
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
-	float StairStickMaxSpeedCm = 900.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StairStickNormalKill = 1.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StairStickLiftKill = 1.0f;
-
-	// ================= 贴附/粘性(2026-10-07 用户需求)=================
-	// "小球在平地以及墙上的时候,要与地面或者墙体有粘性,也就是不能平地飞起来。"
-	//
-	// 探针沿**当前重力方向**打(GetActiveGravityDirection,不是世界 -Z)——
-	// 所以"墙"自动包含在内:重力被转到侧面以后,那面墙就是局部坐标系里的地面,同一条路径。
-	// **楼梯段整个让路**:楼梯有自己的吸附+防飞,两套一起上会互相抵消。
-	//
-	// 两件事,同一个门控(球没在快速离面时都生效):
-	//   ① 削离面速度 —— 把正在离开这个面的那部分速度削掉。
-	//   ② 朝面压一个加速度 —— 这就是用户说的"粘性":让球贴着面而不是飘起来。
-	//
-	// **离面速度超过 GroundHugMaxSepSpeedCm 的两件都不做**:弹跳/反重力弹射是**玩法**
-	// (LandingResponse 按冲击速度分档,见 GridLinked 那套落地带),被这条吃掉就没法玩了。
-	// 阈值以下才是"没人想要的小跳"。调不动的现象:弹跳被吃掉 → 调低这个值;
-	// 球还是会飘 → 调高这个值 / 加大 GroundHugAccelCm / 加长 GroundHugReachCm。
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement")
-	bool bGroundHugEnabled = true;
-
-	// 探针长度(cm,球面之外)。球离面超过这个距离就不再属于"贴着",撒手不管。
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
-	float GroundHugReachCm = 40.0f;
-
-	// 离面速度**低于**这个值(cm/s)才粘;高于它的照常弹。
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
-	float GroundHugMaxSepSpeedCm = 300.0f;
-
-	// 削的比例。1 = 把离面分量削干净(小跳变贴地滚)。
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float GroundHugKill = 1.0f;
-
-	// 朝面压的加速度(cm/s²,沿接触法向指向面内)。粘性强度。0 = 只削速度不压。
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
-	float GroundHugAccelCm = 600.0f;
 
 	// 控制基向量随相机角度自适应(2026-09-13 用户定则):视线与支撑面越"正面相对"
 	// (FaceOn=|视线·支撑上|→1),移动基越向"屏幕相对"过渡——W 从"视线在面内的投影"
@@ -775,19 +674,11 @@ public:
 	float FaceCaptureReleaseTime = -1000.0f;
 
 	// ---- 楼梯强化状态(瞬时,非反射) ----
-	// 垂直速度的指数均值(沿**重力反方向**,不是世界 Z —— 重力转过去以后世界 Z 没意义)。
-	// 唯一的"在爬/在守"判据:> StairTrendAscendCm = 在爬。光看瞬时速度方向区分不了
-	// "爬台阶(需要向上速度)"和"被顶飞",趋势能区分,而且它是平滑量、不抖(见旋钮区的说明)。
+	// 垂直速度的指数均值:用来判"当前是不是在下坡"。硬约束只在下坡趋势时生效——
+	// 光看瞬时速度方向区分不了"爬台阶(需要向上速度)"和"被顶飞",趋势能区分。
 	float StairVzTrendCm = 0.0f;
 	// 上次踩到的楼梯是不是"点名强化"的那一类(离开楼梯后的端点延续要靠它决定强度)。
 	bool bLastStairBoosted = false;
-
-	// ---- 楼梯判定状态(瞬时,非反射) ----
-	bool bClimbAhead = false;
-	// 前探针量到的前方落差(cm,正 = 前方更高)。**只喂给爬坡助力定目标速度**,不参与判定。
-	float StairAheadRiseMeasuredCm = 0.0f;
-	// 水平行进方向(球速在垂直于重力的平面上的投影),太慢时沿用上次。
-	FVector StairTravelDir = FVector::ZeroVector;
 
 	// ---- 楼梯端点延续吸附状态(瞬时,非反射) ----
 	// 最后一次"确实踩在楼梯上"的球位置与时刻;离开楼梯后的一小块里靠它判断还在端点区。
