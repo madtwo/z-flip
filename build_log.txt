@@ -1,0 +1,51 @@
+﻿Using bundled DotNet SDK version: 10.0 win-x64
+Running UnrealBuildTool: dotnet "..\..\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll" ZFlipEditor Win64 Development -Project=E:\Github\z-flip\z-flip.uproject -WaitMutex
+Log file: C:\Users\ROG\AppData\Local\UnrealBuildTool\Log.txt
+Determining max actions to execute in parallel (24 physical cores, 32 logical cores)
+  Executing up to 24 processes, one per physical core
+  Requested 1.5 GB memory per action, 15.62 GB available: limiting max parallel actions to 10
+Using 'git status' to determine working set for adaptive non-unity build (E:\Github\z-flip).
+Failed to start git process using command line git --no-optional-locks status --porcelain
+Creating makefile for ZFlipEditor (no existing makefile)
+UbaServer - Listening on 0.0.0.0:1345
+UHT compiled-in object format Default
+Building ZFlipEditor...
+===== Toolchain Information =====
+Using ISPC compiler (D:\EPIC\UE_5.8\Engine\Source\ThirdParty\Intel\ISPC\bin\Windows\ispc.exe)
+  Intel(r) Implicit SPMD Program Compiler (Intel(r) ISPC), 1.24.0 (build commit  @ 20250404, LLVM 18.1.2) 
+Using Visual Studio 14.50.35730 toolchain (D:\VSC\VC\Tools\MSVC\14.50.35717) and Windows 10.0.26100.0 SDK (D:\Windows Kits\10).
+=================================
+Using Unreal Build Accelerator local executor to run 19 action(s)
+  CPU 24 physical cores, 32 logical cores
+  Memory 15.62 GB physical, 27.27 GB/31.12 GB committed
+  UBA Storage capacity 40 GB
+[1/19] Compile [x64] SharedPCH.UnrealEd.Project.ValApi.ValExpApi.Cpp20.cpp
+[2/19] Compile [x64] Module.BlockoutToolsPlugin.cpp
+[3/19] Link [x64] UnrealEditor-BlockoutToolsPlugin.lib
+  正在创建库 E:/Github/z-flip/Plugins/Blockoute60d8e1bd542V15/Intermediate/Build/Win64/x64/UnrealEditor/Development/BlockoutToolsPlugin/UnrealEditor-BlockoutToolsPlugin.lib 和对象 E:/Github/z-flip/Plugins/Blockoute60d8e1bd542V15/Intermediate/Build/Win64/x64/UnrealEditor/Development/BlockoutToolsPlugin/UnrealEditor-BlockoutToolsPlugin.exp
+[4/19] Compile [x64] Module.GravityShift.cpp
+[5/19] Link [x64] UnrealEditor-GravityShift.lib
+  正在创建库 E:/Github/z-flip/Plugins/GravityShift/Intermediate/Build/Win64/x64/UnrealEditor/Development/GravityShift/UnrealEditor-GravityShift.lib 和对象 E:/Github/z-flip/Plugins/GravityShift/Intermediate/Build/Win64/x64/UnrealEditor/Development/GravityShift/UnrealEditor-GravityShift.exp
+[6/19] Compile [x64] PerModuleInline.gen.cpp
+[7/19] Compile [x64] ZFlipModule.cpp
+[8/19] Link [x64] UnrealEditor-ZFlip.lib
+  正在创建库 E:/Github/z-flip/Intermediate/Build/Win64/x64/UnrealEditor/Development/ZFlip/UnrealEditor-ZFlip.lib 和对象 E:/Github/z-flip/Intermediate/Build/Win64/x64/UnrealEditor/Development/ZFlip/UnrealEditor-ZFlip.exp
+[9/19] Compile [x64] Module.BlockoutToolsEditorPlugin.cpp
+[10/19] Link [x64] UnrealEditor-BlockoutToolsEditorPlugin.lib
+  正在创建库 E:/Github/z-flip/Plugins/Blockoute60d8e1bd542V15/Intermediate/Build/Win64/x64/UnrealEditor/Development/BlockoutToolsEditorPlugin/UnrealEditor-BlockoutToolsEditorPlugin.lib 和对象 E:/Github/z-flip/Plugins/Blockoute60d8e1bd542V15/Intermediate/Build/Win64/x64/UnrealEditor/Development/BlockoutToolsEditorPlugin/UnrealEditor-BlockoutToolsEditorPlugin.exp
+[11/19] Compile Resource [x64] Default.rc2
+[12/19] Link [x64] UnrealEditor-ZFlip.dll
+[13/19] Compile Resource [x64] Default.rc2
+[14/19] Link [x64] UnrealEditor-BlockoutToolsEditorPlugin.dll
+[15/19] Compile Resource [x64] Default.rc2
+[16/19] Link [x64] UnrealEditor-BlockoutToolsPlugin.dll
+[17/19] Compile Resource [x64] Default.rc2
+[18/19] Link [x64] UnrealEditor-GravityShift.dll
+[19/19] WriteMetadata ZFlipEditor.target [NoUba]
+
+Total time in Unreal Build Accelerator local executor: 56.91 seconds
+Output binary: D:\EPIC\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe
+
+Result: Succeeded
+Total execution time: 73.57 seconds
+Trace written to file C:\Users\ROG\AppData\Local\UnrealBuildTool\Trace.uba with size 16.7kb
