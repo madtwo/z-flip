@@ -800,7 +800,30 @@ protected:
 	double LastStuckRescueTime = -1.0;
 	FVector LastSafeLocation = FVector::ZeroVector;
 	bool bHasLastSafeLocation = false;
+	// 2026-10-07 修正:救援必须读到"物理解算后的真实位移",而骑行每帧把速度写成 500,
+	// 所以判"停住"不能用速度,要用位置增量(见 UpdateStuckRescue)。
+	FVector RescuePrevLoc = FVector::ZeroVector;
+	bool bHasRescuePrev = false;
+	// 骑行 watchdog(2026-10-07 物理向专家 P1):按"真实前向位移"判骑行失败,失败即中止骑行。
+	FVector RedirectPrevLoc = FVector::ZeroVector;
+	bool bHasRedirectPrevLoc = false;
+	float RedirectStallWindowSeconds = 0.0f;
+	float RedirectStallProgressCm = 0.0f;
+	// 最近"无穿透"位置环(专家建议:救援退回时用它,而不是"来路×1.5R"盲推——终点校验
+	// 拦不住"中途穿过一面薄墙"的情况)。
+	static constexpr int32 SafeSampleCount = 12;
+	FVector SafeSamples[SafeSampleCount];
+	bool bHasSafeSamples[SafeSampleCount] = {};
+	int32 SafeSampleWriteIndex = 0;
+	// 卡死中止 ≠ 正常结束:中止时不要无条件提交出口重力(卡点常在出口面附近,提交会把球
+	// 压向楔槽另一面)。专家建议:进度 <50% 回入口重力,≥50% 才提交出口。
+	void AbortGravityRedirect();
 	void UpdateStuckRescue(float DeltaSeconds);
+	void RecordSafeSample(const FVector& Location);
+	bool FindRecentSafeSample(FVector& OutLocation) const;
+	// 骑行被"浅楔死"时的自救(2026-10-07 用户反馈 V6 下坡一直卡):用每个重叠组件自己的 MTD
+	// 小步迭代把球挪出楔口——挪出来就继续骑行,不打断过弧。返回是否已无重叠。
+	bool TryUnwedgeByMTD(float MaxStepCm, int32 MaxSteps);
 	FVector CurrentCameraUp = FVector::UpVector;
 	FVector TargetCameraUp = FVector::UpVector;
 	FQuat CurrentCameraRotation = FQuat::Identity;

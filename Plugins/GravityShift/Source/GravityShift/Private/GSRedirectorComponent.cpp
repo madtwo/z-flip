@@ -13,11 +13,30 @@ UGSRedirectorComponent::UGSRedirectorComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = true;
+	// 2026-10-07:编辑器里用 SubobjectDataSubsystem 给关卡里的静态网格件补挂本组件时,
+	// 新组件**不会**自动激活(auto_activate 默认 false)⇒ 判定/触发全是死代码。
+	// 这里把默认改为自动激活(按实例已在关卡里持久化,此默认用于兜底任何新加的实例)。
+	bAutoActivate = true;
 }
 
 void UGSRedirectorComponent::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// 2026-10-07 自愈:编辑器里用 SubobjectDataSubsystem 补挂的组件在 PIE 里**不会自动激活**
+	// (实测 is_active=False / is_component_tick_enabled=False,判定全是死代码)。
+	// BeginPlay 对"已注册但未激活"的组件照样会跑 ⇒ 在这里自我激活 + 开 Tick,
+	// 保证任何来源(关卡序列化 / 运行时补挂)的组件都在工作。
+	if (!IsComponentTickEnabled())
+	{
+		SetComponentTickEnabled(true);
+	}
+	if (!IsActive())
+	{
+		Activate(true);
+	}
+	UE_LOG(LogTemp, Log, TEXT("[GSRedirector] BeginPlay selfheal: active=%d tick=%d (%s)"),
+		IsActive() ? 1 : 0, IsComponentTickEnabled() ? 1 : 0, *GetNameSafe(GetOwner()));
 
 	// 触发范围 = 自身(网格)包围盒外扩(廉价先筛),同时记住网格原始包围盒(碰到判定用)。
 	if (const AActor* Owner = GetOwner())
@@ -25,7 +44,6 @@ void UGSRedirectorComponent::BeginPlay()
 		MeshBounds = Owner->GetComponentsBoundingBox(true);
 		TriggerBounds = MeshBounds.ExpandBy(TriggerInflateCm);
 	}
-
 	if (bDebugLog)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s armed: faces=%s<->%s bounds=(%s)..(%s)"),
@@ -241,9 +259,18 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	if (!bEnabled || !TriggerBounds.IsValid)
+	if (!bEnabled)
 	{
 		return;
+	}
+	// 2026-10-07:包围盒只用于取"最近点方向"与调试显示,**不再作为触发前置条件**。
+	// (原实现 `if (!TriggerBounds.IsInside(BallLoc)) return;` 是廉价预筛,但它一旦算不准
+	//  ——缩放过的小件/补挂组件/BeginPlay 时 bounds 未就绪——球贴着弧面也永远不触发。
+	//  真正管用的门是后面的接触探针:球面到弧面的距离 ≤ 半径+20cm 才算"碰到"。)
+	if (const AActor* Owner = GetOwner())
+	{
+		MeshBounds = Owner->GetComponentsBoundingBox(true);
+		TriggerBounds = MeshBounds.ExpandBy(TriggerInflateCm);
 	}
 
 	UWorld* World = GetWorld();
@@ -307,7 +334,10 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		return;
 	}
 
-	if (!TriggerBounds.IsInside(BallLoc))
+	// 2026-10-07:触发盒**不再拦截**(见函数开头注释)——接触探针才是真正的"碰到"判定。
+	// 保留一段宽松的距离预筛(球到弧的包围盒最近点 ≤ 半径+外扩),防止远处空跑判定链。
+	const FVector ToBox = MeshBounds.IsValid ? (MeshBounds.GetClosestPointTo(BallLoc) - BallLoc) : FVector::ZeroVector;
+	if (MeshBounds.IsValid && ToBox.SizeSquared() > FMath::Square(150.0f + TriggerInflateCm))
 	{
 		return;
 	}
@@ -409,17 +439,19 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	const float NormalAxisDot = FMath::Abs(FVector::DotProduct(ContactNormal, BendAxis));
 	if (NormalAxisDot > MaxLateralNormalDot)
 	{
-		GateLog(TEXT("side"), ExitDir, NormalAxisDot, true);   // 撞侧面:只记录,不再拦
+		GateLog(TEXT("side"), ExitDir, NormalAxisDot, true);
+		return;   // 恢复拦截:撞侧壁不是进入(2026-10-07 用户"反复被拉扯/无法自由移动")
 	}
 
-	// 贴背面/外底面(内弧面门):只记录,不再拦。
+	// 贴背面/外底面(内弧面门):恢复拦截。
 	if (bRequireInnerArcFace)
 	{
 		const float InnerEntryDot = FVector::DotProduct(ContactNormal, EntryUp);
 		const float InnerExitDot = FVector::DotProduct(ContactNormal, ExitUp);
 		if (InnerEntryDot < -ArcFaceNormalTolerance || InnerExitDot < -ArcFaceNormalTolerance)
 		{
-			GateLog(TEXT("arcface"), ExitDir, InnerEntryDot, true);   // 只记录,不再拦
+			GateLog(TEXT("arcface"), ExitDir, InnerEntryDot, true);
+			return;
 		}
 	}
 
@@ -438,16 +470,18 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	const float Radius = BallSphere->GetScaledSphereRadius();
 	if (DistToLipCm > Radius + EntryLipBandCm)
 	{
-		GateLog(TEXT("lip"), ExitDir, DistToLipCm, true);   // 只记录,不再拦
+		GateLog(TEXT("lip"), ExitDir, DistToLipCm, true);
+		return;   // 恢复拦截:只认"正面接地那一块"
 	}
 
-	// 支撑门/分离门:只记录,不再拦(碰到了就触发)。
+	// 支撑门/分离门:恢复拦截(擦过/弹开/空中掠过不算进入)。
 	if (bRequireSupportToTrigger && Ball->LandingResponse)
 	{
 		const float AirborneSec = Ball->LandingResponse->GetAirborneSeconds();
 		if (!Ball->LandingResponse->IsSupported() || AirborneSec > MaxAirborneSecondsForTrigger)
 		{
-			GateLog(TEXT("airborne"), ExitDir, AirborneSec, bTouch);   // 只记录,不再拦
+			GateLog(TEXT("airborne"), ExitDir, AirborneSec, bTouch);
+			return;
 		}
 	}
 	if (bRejectSeparatingContact)
@@ -455,20 +489,25 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		const float SepSpeedCm = FVector::DotProduct(Velocity, ContactNormal);
 		if (SepSpeedCm > SeparationRejectSpeedCm)
 		{
-			GateLog(TEXT("separating"), ExitDir, SepSpeedCm, bTouch);   // 只记录,不再拦
+			GateLog(TEXT("separating"), ExitDir, SepSpeedCm, bTouch);
+			return;
 		}
 	}
 
-	// 速度门/方向门:只记录,不再拦(碰到了就触发)。
+	// 速度门:静止球不触发(恢复拦截,但门槛压低:15cm/s 以上即算在滚)。
+	// 方向门:速度必须大体朝出口方向 —— **这条是"反复被拉扯"的关键**(球在弧旁边
+	// 正常移动、方向并不朝出口时不该被抓住拉走)。
 	const float RetreatSpeedCm = FVector::DotProduct(Velocity, ExitDir);
-	if (Speed < MinTriggerSpeedCm && RetreatSpeedCm < -SlowEntrySpeedCm)
+	if (Speed < 15.0f && RetreatSpeedCm < -SlowEntrySpeedCm)
 	{
-		GateLog(TEXT("speed"), ExitDir, RetreatSpeedCm, true);   // 只记录,不再拦
+		GateLog(TEXT("speed"), ExitDir, RetreatSpeedCm, true);
+		return;
 	}
 	const float Align = Speed > 1.0f ? FVector::DotProduct(Velocity / Speed, ExitDir) : 0.0f;
 	if (Speed >= SlowEntrySpeedCm && Align < EntryAlignmentMin)
 	{
-		GateLog(TEXT("align"), ExitDir, Align, true);   // 只记录,不再拦
+		GateLog(TEXT("align"), ExitDir, Align, true);
+		return;
 	}
 
 	// 入口速度整理:侧向(垂直弯道平面)分量按比例清掉;前向速度作为滑行速度

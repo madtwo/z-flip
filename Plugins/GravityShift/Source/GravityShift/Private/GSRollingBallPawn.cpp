@@ -4,6 +4,7 @@
 #include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "EngineUtils.h"
+#include "Engine/OverlapResult.h"
 #include "Engine/World.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "GameFramework/PlayerController.h"
@@ -337,6 +338,10 @@ void AGSRollingBallPawn::BeginGravityRedirect(FVector TargetGravityDirection, fl
 	GravityRedirectHoldElapsed = 0.0f;
 	bGravityRedirectRotationCommitted = false;
 	bGravityRedirectActive = true;
+	// 骑行 watchdog 与"真实位移"基准复位(新一次骑行从零开始)
+	RedirectStallWindowSeconds = 0.0f;
+	RedirectStallProgressCm = 0.0f;
+	bHasRedirectPrevLoc = false;
 
 	if (GravityBody)
 	{
@@ -369,6 +374,110 @@ void AGSRollingBallPawn::EndGravityRedirect()
 	bGravityRedirectActive = false;
 }
 
+// 卡死中止(与正常结束分开,2026-10-07 物理向专家建议):
+// 正常结束一定把重力提交到出口;中止时按进度决定——进度 <50% 说明球还没走完弯道,
+// 此时提交出口重力会把球压向"出口那一面"(卡点常常就在出口面附近,那正是楔槽的另一侧)。
+void AGSRollingBallPawn::AbortGravityRedirect()
+{
+	if (!bGravityRedirectActive)
+	{
+		return;
+	}
+	const float Progress = GravityRedirectPathCm / FMath::Max(GravityRedirectPathLength, 1.0f);
+	GravityRedirectCurrent = (Progress >= 0.5f) ? GravityRedirectTo : GravityRedirectFrom;
+	if (!bGravityRedirectRotationCommitted)
+	{
+		bGravityRedirectRotationCommitted = true;
+		if (GravityManager)
+		{
+			GravityManager->RequestGravityDirection(GSGravity::VectorToDirection(GravityRedirectCurrent),
+				this, EGSGravityChangeReason::SCRIPTED, true);
+		}
+	}
+	if (GravityBody)
+	{
+		GravityBody->SetGravityDirectionOverride(FVector::ZeroVector);
+	}
+	bGravityRedirectActive = false;
+	RedirectStallWindowSeconds = 0.0f;
+	RedirectStallProgressCm = 0.0f;
+	bHasRedirectPrevLoc = false;
+}
+
+// "无穿透"位置环:只在"完全没接触"(六轴探针全是 0)的帧写入,救援退回时用它。
+void AGSRollingBallPawn::RecordSafeSample(const FVector& Location)
+{
+	SafeSamples[SafeSampleWriteIndex] = Location;
+	bHasSafeSamples[SafeSampleWriteIndex] = true;
+	SafeSampleWriteIndex = (SafeSampleWriteIndex + 1) % SafeSampleCount;
+}
+
+bool AGSRollingBallPawn::FindRecentSafeSample(FVector& OutLocation) const
+{
+	for (int32 i = 0; i < SafeSampleCount; ++i)
+	{
+		const int32 Index = (SafeSampleWriteIndex - 1 - i + SafeSampleCount * 2) % SafeSampleCount;
+		if (bHasSafeSamples[Index])
+		{
+			OutLocation = SafeSamples[Index];
+			return true;
+		}
+	}
+	return false;
+}
+
+// 骑行自救:浅楔死(两面各吃 2~3cm 也会死锁)时,用 MTD 小步迭代把球挪出来 —— 挪出来就**继续骑行**,
+// 不打断过弧(2026-10-07 用户反馈 SM_Wall_11_V6 下坡"一直在卡":watchdog 每 0.3s 中止一次骑行,
+// 而救援因浅穿透(仅 2~3cm)不触发,于是永远卡在弧口)。
+bool AGSRollingBallPawn::TryUnwedgeByMTD(float MaxStepCm, int32 MaxSteps)
+{
+	UWorld* World = GetWorld();
+	if (!World || !BallCollision)
+	{
+		return false;
+	}
+	const float Radius = BallCollision->GetScaledSphereRadius();
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(GSUnwedge), false, this);
+	Params.AddIgnoredActor(this);
+	for (int32 Step = 0; Step < MaxSteps; ++Step)
+	{
+		const FVector Loc = BallCollision->GetComponentLocation();
+		TArray<FOverlapResult> Overlaps;
+		if (!World->OverlapMultiByChannel(Overlaps, Loc, FQuat::Identity, ECC_WorldStatic,
+			FCollisionShape::MakeSphere(Radius), Params))
+		{
+			return true;   // 已经没有重叠 = 解开了
+		}
+		FVector Dir = FVector::ZeroVector;
+		float DistCm = 0.0f;
+		for (const FOverlapResult& O : Overlaps)
+		{
+			UPrimitiveComponent* Comp = O.GetComponent();
+			if (!Comp)
+			{
+				continue;
+			}
+			FMTDResult Mtd;
+			if (Comp->ComputePenetration(Mtd, FCollisionShape::MakeSphere(Radius), Loc, FQuat::Identity))
+			{
+				if (Mtd.Distance > DistCm)
+				{
+					DistCm = Mtd.Distance;
+					Dir = Mtd.Direction.GetSafeNormal();
+				}
+			}
+		}
+		if (DistCm < 0.3f || Dir.IsNearlyZero())
+		{
+			return false;   // 算不出 MTD(open edge / 病态三角面)⇒ 交救援/中止
+		}
+		SetActorLocation(Loc + Dir * FMath::Min(DistCm + 0.5f, MaxStepCm), false, nullptr, ETeleportType::TeleportPhysics);
+	}
+	TArray<FOverlapResult> Final;
+	return !World->OverlapMultiByChannel(Final, BallCollision->GetComponentLocation(), FQuat::Identity,
+		ECC_WorldStatic, FCollisionShape::MakeSphere(Radius), Params);
+}
+
 void AGSRollingBallPawn::UpdateGravityRedirect(float DeltaSeconds)
 {
 	if (!bGravityRedirectActive)
@@ -394,6 +503,7 @@ void AGSRollingBallPawn::UpdateGravityRedirect(float DeltaSeconds)
 	float GapCm = 0.0f;
 	FVector ContactNormal = FVector::ZeroVector;
 	bool bHasSurface = false;
+	bool bStartPenetrating = false;   // 球心已越过三角面(Chaos 会把该面的推出接触删掉)
 	FString ContactName = TEXT("air");
 	if (const UWorld* World = GetWorld())
 	{
@@ -408,6 +518,7 @@ void AGSRollingBallPawn::UpdateGravityRedirect(float DeltaSeconds)
 				bHasSurface = true;
 				ContactNormal = GroundHit.Normal.GetSafeNormal();
 				GapCm = GroundHit.Distance - Radius;
+				bStartPenetrating = GroundHit.bStartPenetrating;
 				if (GroundHit.GetActor())
 				{
 					ContactName = GroundHit.GetActor()->GetName();
@@ -416,21 +527,115 @@ void AGSRollingBallPawn::UpdateGravityRedirect(float DeltaSeconds)
 		}
 	}
 
-	FVector DesiredVelocity = Forward * GravityRedirectSpeed;
-	if (bHasSurface && !ContactNormal.IsNearlyZero())
+	// ★骑行驱动 = 速度伺服(2026-10-07 物理向专家 P3,根治项):
+	//   旧写法每帧 SetPhysicsLinearVelocity(500) —— Chaos 接触解算刚算出的分离速度下一帧就被
+	//   覆盖掉,球被永久顶死在几何上,玩家 400cm/s^2 的输入也完全竞争不过。
+	//   现改为施加**受限加速度**,让速度逐步逼近目标切向;解算器的分离/接触响应得以保留。
+	const FVector VCurrent = BallCollision ? BallCollision->GetPhysicsLinearVelocity() : FVector::ZeroVector;
+	FVector ServoAccel = FVector::ZeroVector;
 	{
-		const float NormalSpeed = FMath::Clamp(-GapCm * SurfaceFollowGain,
-			-GravityRedirectSpeed, GravityRedirectSpeed);
-		DesiredVelocity = FVector::VectorPlaneProject(DesiredVelocity, ContactNormal)
-			+ ContactNormal * NormalSpeed;
+		// 切向:朝"目标切向(骑行速度在接触面切平面上的投影)"伺服;6000 ≈ 两倍重力加速度,
+		// 保证上坡爬得动,同时有界(不会把球射出去)。
+		FVector TargetTangent = FVector::VectorPlaneProject(Forward * GravityRedirectSpeed, ContactNormal);
+		FVector CurrentTangent = (bHasSurface && !ContactNormal.IsNearlyZero())
+			? FVector::VectorPlaneProject(VCurrent, ContactNormal)
+			: VCurrent;
+		FVector Error = TargetTangent - CurrentTangent;
+		if (!Error.IsNearlyZero())
+		{
+			ServoAccel += (Error / 0.10f).GetClampedToMaxSize(6000.0f);
+		}
+		// 法向吸附:只在仍有间隙时往面里吸(负 gap=已穿透 ⇒ 绝不再产生朝面里的分量,
+		// 那部分交给解算器/MTD 救援处理)。
+		if (bHasSurface && !ContactNormal.IsNearlyZero() && !bStartPenetrating)
+		{
+			const float NormalAccel = FMath::Clamp(-GapCm * SurfaceFollowGain * 10.0f, 0.0f, 4000.0f);
+			if (NormalAccel > 0.0f)
+			{
+				ServoAccel -= ContactNormal * NormalAccel;
+			}
+		}
 	}
 
-	const FVector ActualVelocity = BallCollision ? BallCollision->GetPhysicsLinearVelocity() : FVector::ZeroVector;
-	if (BallCollision && BallCollision->IsSimulatingPhysics() && GravityRedirectSpeed > 0.0f)
+	const FVector ActualVelocity = VCurrent;
+	if (BallCollision && BallCollision->IsSimulatingPhysics())
 	{
-		BallCollision->SetPhysicsLinearVelocity(DesiredVelocity.GetSafeNormal() * GravityRedirectSpeed);
-		// 旋转进度按"实际走掉的位移"累计(球被挡住时重力先不转,不会脱节)。
-		GravityRedirectPathCm += ActualVelocity.Size() * Dt;
+		// 睡眠状态下 AddForce/SetLinearVelocity 都是空操作(引擎实现忽略 bAutoWake)。
+		if (!BallCollision->RigidBodyIsAwake())
+		{
+			BallCollision->WakeRigidBody();
+		}
+		BallCollision->AddForce(ServoAccel, NAME_None, true);   // bAccelChange=true:与质量无关
+
+		// 进度用**真实位置增量**沿前进方向的投影累计(专家指出 ActualVelocity.Size()*Dt 只是速度积分,
+		// 骑行每帧把速度写成 500,这一项恒为正,和"实际走没走"完全脱钩)。
+		const FVector RideLoc = BallCollision->GetComponentLocation();
+		const float ForwardDeltaCm = bHasRedirectPrevLoc
+			? FMath::Max(0.0f, FVector::DotProduct(RideLoc - RedirectPrevLoc, Forward))
+			: 0.0f;
+		RedirectPrevLoc = RideLoc;
+		bHasRedirectPrevLoc = true;
+		GravityRedirectPathCm += ForwardDeltaCm;
+
+		// ★骑行 watchdog(专家 P1,取代"最多 5 秒没有控制权"):0.3s 窗口内沿前进方向的真实位移
+		// 不足 8cm ⇒ 骑行已被几何卡住 ⇒ 立刻中止骑行,把控制权与脱困交给救援(5s 超时只留作程序保险)。
+		RedirectStallWindowSeconds += Dt;
+		RedirectStallProgressCm += ForwardDeltaCm;
+		if (RedirectStallWindowSeconds >= 0.3f)
+		{
+			const float WindowProgressCm = RedirectStallProgressCm;
+			const bool bStalled = WindowProgressCm < 8.0f;
+			RedirectStallWindowSeconds = 0.0f;
+			RedirectStallProgressCm = 0.0f;
+			if (bStalled)
+			{
+				// 2026-10-07(用户反馈"爬上去了又被一点点拉回来"):分辨"真被楔住"与"只是爬得慢"。
+				// 只有球确实**被埋**(重叠 + MTD ≥3cm)才是卡死;慢爬一律继续骑行 —— 旧逻辑把慢爬
+				// 当卡死、每 0.3s 中止一次骑行,球就被推上去一点又顺着弧滚回来。
+				float EmbedCm = 0.0f;
+				if (UWorld* W = GetWorld())
+				{
+					if (BallCollision)
+					{
+						const FVector ProbeLoc = BallCollision->GetComponentLocation();
+						TArray<FOverlapResult> Ovl;
+						FCollisionQueryParams P(SCENE_QUERY_STAT(GSRideEmbed), false, this);
+						if (W->OverlapMultiByChannel(Ovl, ProbeLoc, FQuat::Identity, ECC_WorldStatic,
+							FCollisionShape::MakeSphere(Radius), P))
+						{
+							for (const FOverlapResult& O : Ovl)
+							{
+								UPrimitiveComponent* Comp = O.GetComponent();
+								if (!Comp)
+								{
+									continue;
+								}
+								FMTDResult M;
+								if (Comp->ComputePenetration(M, FCollisionShape::MakeSphere(Radius), ProbeLoc, FQuat::Identity))
+								{
+									EmbedCm = FMath::Max(EmbedCm, M.Distance);
+								}
+							}
+						}
+					}
+				}
+				RedirectStallWindowSeconds = 0.0f;
+				RedirectStallProgressCm = 0.0f;
+				if (EmbedCm >= 3.0f)
+				{
+					if (TryUnwedgeByMTD(8.0f, 4))
+					{
+						UE_LOG(LogTemp, Warning, TEXT("[GSRedirect] 真卡死(0.3s %.1fcm,埋深 %.1f) → MTD 解楔成功,继续骑行"), WindowProgressCm, EmbedCm);
+						return;
+					}
+					UE_LOG(LogTemp, Warning, TEXT("[GSRedirect] 真卡死(0.3s %.1fcm,埋深 %.1f) MTD 解不开 → 中止骑行交救援"), WindowProgressCm, EmbedCm);
+					AbortGravityRedirect();
+					return;
+				}
+				// 只是慢(没被埋):保持骑行继续推,不中止。
+				UE_LOG(LogTemp, Warning, TEXT("[GSRedirect] 爬得慢(0.3s %.1fcm)但没被埋 → 继续骑行"), WindowProgressCm);
+			}
+		}
 	}
 
 	// 2) 重力随滑行距离旋转(smoothstep 起步/收尾柔和)。按距离而不是按时间推进:
@@ -448,10 +653,10 @@ void AGSRollingBallPawn::UpdateGravityRedirect(float DeltaSeconds)
 	if (bRedirectDebugLog)
 	{
 		const FVector BallLoc = BallCollision ? BallCollision->GetComponentLocation() : FVector::ZeroVector;
-		UE_LOG(LogTemp, Log, TEXT("[GSRedirect] t=%.2f ball=(%.0f,%.0f,%.0f) actual=(%.0f,%.0f,%.0f) cmd=(%.0f,%.0f,%.0f) contact=%s gap=%.0f up=(%.2f,%.2f,%.2f) prog=%.2f/%.0f"),
+		UE_LOG(LogTemp, Log, TEXT("[GSRedirect] t=%.2f ball=(%.0f,%.0f,%.0f) actual=(%.0f,%.0f,%.0f) servo=(%.0f,%.0f,%.0f) contact=%s gap=%.0f up=(%.2f,%.2f,%.2f) prog=%.2f/%.0f"),
 			GravityRedirectHoldElapsed, BallLoc.X, BallLoc.Y, BallLoc.Z,
 			ActualVelocity.X, ActualVelocity.Y, ActualVelocity.Z,
-			DesiredVelocity.X, DesiredVelocity.Y, DesiredVelocity.Z,
+			ServoAccel.X, ServoAccel.Y, ServoAccel.Z,
 			*ContactName, GapCm, Up.X, Up.Y, Up.Z, GravityRedirectPathCm, GravityRedirectPathLength);
 	}
 
@@ -1598,6 +1803,13 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 
 	const bool bSupported = LandingResponse ? LandingResponse->IsSupported() : false;
 
+	// 睡眠中的刚体对 AddForce 是空操作(引擎实现里 bAutoWake 被忽略)⇒ 有输入先唤醒,
+	// 否则会出现"球停在原地后玩家推不动"(2026-10-07 物理向专家定位)。
+	if (!BallCollision->RigidBodyIsAwake())
+	{
+		BallCollision->WakeRigidBody();
+	}
+
 	if (bSupported)
 	{
 		// Drive: direct planar acceleration (mass-independent). 旧的力矩驱动在低摩擦
@@ -1754,11 +1966,12 @@ void AGSRollingBallPawn::PollNativeInput()
 	bSpeedUpKeyWasDown = bSpeedUpDown;
 }
 
-// 卡死救援(2026-10-07 用户反馈 V10/V13 圆弧处"还是会卡"):球有时会从美术网格的开口钻进
-// 比它直径还窄的空腔,物理解算推不出来 —— 判定转了也没用,玩家就是推不动。
-// 只在三条同时成立、并持续 TriggerSeconds 时才动:①玩家在推/正在骑行 ②球速≈0
-// ③球体内芯(0.6R)与世界几何**重叠**(被埋的特征;正常顶墙只有表面接触,内芯是空的)。
-// 动作只有一次位移:沿"来路"(最近一次没被埋的位置)顶出 1.5R,再带一点向上分量。
+// 卡死救援(2026-10-07 第二版,按专家定位重写):
+// 旧版的确定性 bug —— 它排在 UpdateGravityRedirect 之后,读到的"球速"是骑行刚写进去的
+// 指令值 500 ⇒ `Speed>25` 恒成立 ⇒ 计时器每帧清零,数学上不可能触发。
+// 新版三条硬约束:①"被埋"用**整半径六轴探针的插入深度**(2cm 内是正常静息接触,实测卡点约 10cm)
+// ②"停住"用**位置增量**判定(速度读数被骑行污染) ③逃逸落点先做自由性校验再传送,
+// 并在救援当帧 EndGravityRedirect 把控制权还给玩家(否则输入会继续被每帧 500 压制)。
 void AGSRollingBallPawn::UpdateStuckRescue(float DeltaSeconds)
 {
 	UWorld* World = GetWorld();
@@ -1766,70 +1979,211 @@ void AGSRollingBallPawn::UpdateStuckRescue(float DeltaSeconds)
 	{
 		return;
 	}
+	const float Dt = FMath::Clamp(DeltaSeconds, 0.0f, 0.1f);
 	const FVector Loc = BallCollision->GetComponentLocation();
 	const float Radius = BallCollision->GetScaledSphereRadius();
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(GSStuckRescue), false, this);
 	Params.AddIgnoredActor(this);
 
-	// 用 0.85R 的探测球:球表面插进网格 ≳7.5cm 时判为"被埋"(实测卡死点插进 10cm);
-	// 正常贴墙/压墙时球面只是接触(重叠 0),不会误报。
-	const bool bBuried = World->OverlapAnyTestByChannel(
-		Loc, FQuat::Identity, ECC_Visibility, FCollisionShape::MakeSphere(Radius * 0.85f), Params);
-	if (!bBuried)
+	// ① 插入深度:六轴整半径探针,深度 = 半径 − 命中距离(>0 = 球面已插进网格)。
+	//    通道用 ECC_WorldStatic(与转向器接触判定同一条,实测能打到弧网格)。
+	static const FVector Dirs[6] = { FVector(1,0,0), FVector(-1,0,0), FVector(0,1,0),
+	                                 FVector(0,-1,0), FVector(0,0,1), FVector(0,0,-1) };
+	float MaxDepthCm = 0.0f;
+	FVector DeepestNormal = FVector::ZeroVector;
+	// 两种 traceComplex 各测一遍取最深 @2026-10-07 物理向专家:美术件上"简单/复杂"两套形状
+	// 未必一致(判定门与物理解算看到的面可能不是同一套),只问一种会漏判。
+	for (int32 Pass = 0; Pass < 2; ++Pass)
 	{
-		LastSafeLocation = Loc;
+		FCollisionQueryParams PassParams = Params;
+		PassParams.bTraceComplex = (Pass == 1);
+		for (const FVector& D : Dirs)
+		{
+			FHitResult Hit;
+			if (World->LineTraceSingleByChannel(Hit, Loc, Loc + D * (Radius + 20.0f), ECC_WorldStatic, PassParams))
+			{
+				const float DepthCm = Radius - Hit.Distance;
+				if (DepthCm > MaxDepthCm)
+				{
+					MaxDepthCm = DepthCm;
+					DeepestNormal = Hit.ImpactNormal.GetSafeNormal();
+				}
+			}
+		}
+	}
+	// ①b 引擎 MTD(Minimum Translation Direction,专家首选判据):对每个重叠组件问
+	//     "往哪推、推多远才能脱离"。1~3cm 属可疑,≥4cm 对 R=50 的球即明确异常穿透。
+	FVector MtdDir = FVector::ZeroVector;
+	float MtdDistCm = 0.0f;
+	{
+		TArray<FOverlapResult> Overlaps;
+		if (World->OverlapMultiByChannel(Overlaps, Loc, FQuat::Identity, ECC_WorldStatic,
+			FCollisionShape::MakeSphere(Radius), Params))
+		{
+			for (const FOverlapResult& O : Overlaps)
+			{
+				UPrimitiveComponent* Comp = O.GetComponent();
+				if (!Comp)
+				{
+					continue;
+				}
+				FMTDResult Mtd;
+				if (Comp->ComputePenetration(Mtd, FCollisionShape::MakeSphere(Radius), Loc, FQuat::Identity))
+				{
+					if (Mtd.Distance > MtdDistCm)
+					{
+						MtdDistCm = Mtd.Distance;
+						MtdDir = Mtd.Direction.GetSafeNormal();
+					}
+				}
+			}
+		}
+	}
+	// 判据 = 六轴深度 OR 引擎 MTD(专家口径:1~3cm 可疑、≥3~4cm 明确异常;浅楔死由骑行的
+	// MTD 自救先接管,这里取 3cm 兜底)。六轴斜法线会失真,MTD 才是权威,六轴留作交叉证据。
+	const bool bEmbedded = (MaxDepthCm >= 3.0f) || (MtdDistCm >= 3.0f);
+
+	// ② "停住"用位移判(骑行每帧 SetPhysicsLinearVelocity(500),速度读数不可信)。
+	const float MovedCm = bHasRescuePrev ? FVector::Dist(Loc, RescuePrevLoc) : 1.0e9f;
+	RescuePrevLoc = Loc;
+	bHasRescuePrev = true;
+
+	// ③ 意图:骑行/吸附中本身就是"想走",或玩家在推。
+	const bool bIntent = bGravityRedirectActive || bFaceCaptureActive || !MoveInput.IsNearlyZero();
+	const bool bStuckNow = bEmbedded && bIntent && MovedCm <= FMath::Max(Dt * 40.0f, 0.5f);
+
+	StuckBuriedSeconds = bStuckNow ? StuckBuriedSeconds + Dt : 0.0f;
+	if (MaxDepthCm <= 0.0f)
+	{
+		LastSafeLocation = Loc;   // 只在"完全没接触"的干净帧记来路
 		bHasLastSafeLocation = true;
-		StuckBuriedSeconds = 0.0f;
-		return;
+		RecordSafeSample(Loc);    // 历史环:救援退回时用它,避免盲推穿墙
 	}
-
-	const float SpeedCm = BallCollision->GetPhysicsLinearVelocity().Size();
-	// 被埋本身就是坏状态(球芯插进网格里),不需要玩家在推也有意义;但仍要求"停住"，
-	// 避免把高速穿模的那一两帧误当卡死(那种情况物理解算自己能处理)。
-	if (SpeedCm > 25.0f)
+	if (!bStuckNow)
 	{
-		StuckBuriedSeconds = 0.0f;
 		return;
 	}
 
-	StuckBuriedSeconds += DeltaSeconds;
 	const double Now = World->GetTimeSeconds();
-	static constexpr float TriggerSeconds = 0.55f;
-	static constexpr float CooldownSeconds = 1.2f;
+	static constexpr float TriggerSeconds = 0.35f;
+	static constexpr float CooldownSeconds = 0.6f;
 	if (StuckBuriedSeconds < TriggerSeconds
 		|| (LastStuckRescueTime >= 0.0 && Now - LastStuckRescueTime < CooldownSeconds))
 	{
 		return;
 	}
 
-	FVector Dir = bHasLastSafeLocation ? (LastSafeLocation - Loc) : FVector::ZeroVector;
-	Dir.Z += Radius * 0.5f;
-	if (!Dir.Normalize())
+	// ④ 脱困(2026-10-07 物理向专家方案):
+	//   第 1 步 —— 先停掉"正在往约束里驱动"的控制器(否则一边修位置、状态机还在强制骑行/吸附);
+	//   第 2 步 —— 用 MTD 小步迭代解穿透(每步 ≤8cm、每步重算;两面楔死时先离一面再离另一面);
+	//   第 3 步 —— 还解不开就退回"最近的无穿透位置"(历史环,避免盲推穿墙);
+	//   第 4 步 —— 给一个小的离面速度(≈150)而不是零速,免得立刻又沉回接触面。
+	const bool bWasRiding = bGravityRedirectActive;
+	const bool bWasCapturing = bFaceCaptureActive;
+	const FVector VelocityBeforeRescue = BallCollision->GetPhysicsLinearVelocity();
+	// 睡眠时 SetVelocity/AddForce 都是空操作(引擎实现忽略 bAutoWake)⇒ 先唤醒再动。
+	if (!BallCollision->RigidBodyIsAwake())
 	{
-		Dir = -GravityRedirectCurrent;
-		if (!Dir.Normalize())
+		BallCollision->WakeRigidBody();
+	}
+	if (bGravityRedirectActive)
+	{
+		AbortGravityRedirect();   // 中止 ≠ 结束:不无条件提交出口重力(见函数注释)
+	}
+	if (bFaceCaptureActive)
+	{
+		EndFaceCapture();         // v2 的漏洞:吸附状态没被终止,同帧 UpdateFaceCapture 还会继续写速度
+	}
+
+	// 第 2 步:MTD 小步迭代(球心越过三角面时那片面的推出接触被 Chaos 单面规则删掉,
+	// 只能靠位移把球挪出壳层;每步重算才能处理"两面楔死")。
+	float TotalMovedCm = 0.0f;
+	FVector EscapeDir = MtdDir;
+	for (int32 Step = 0; Step < 4; ++Step)
+	{
+		const FVector StepLoc = BallCollision->GetComponentLocation();
+		TArray<FOverlapResult> Overlaps;
+		if (!World->OverlapMultiByChannel(Overlaps, StepLoc, FQuat::Identity, ECC_WorldStatic,
+			FCollisionShape::MakeSphere(Radius), Params))
 		{
-			Dir = FVector::UpVector;
+			break;   // 已无重叠 = 解开了
+		}
+		FVector StepDir = FVector::ZeroVector;
+		float StepDistCm = 0.0f;
+		for (const FOverlapResult& O : Overlaps)
+		{
+			UPrimitiveComponent* Comp = O.GetComponent();
+			if (!Comp)
+			{
+				continue;
+			}
+			FMTDResult Mtd;
+			if (Comp->ComputePenetration(Mtd, FCollisionShape::MakeSphere(Radius), StepLoc, FQuat::Identity))
+			{
+				if (Mtd.Distance > StepDistCm)
+				{
+					StepDistCm = Mtd.Distance;
+					StepDir = Mtd.Direction.GetSafeNormal();
+				}
+			}
+		}
+		if (StepDistCm < 0.5f || StepDir.IsNearlyZero())
+		{
+			break;
+		}
+		if (EscapeDir.IsNearlyZero())
+		{
+			EscapeDir = StepDir;
+		}
+		const float MoveCm = FMath::Min(StepDistCm + 0.5f, 8.0f);
+		SetActorLocation(StepLoc + StepDir * MoveCm, false, nullptr, ETeleportType::TeleportPhysics);
+		TotalMovedCm += MoveCm;
+	}
+
+	// 第 3 步:MTD 解不开(open edge / 病态三角面)⇒ 退回最近的"无穿透"历史位置。
+	bool bUsedSafeFallback = false;
+	{
+		TArray<FOverlapResult> StillOverlapping;
+		if (World->OverlapMultiByChannel(StillOverlapping, BallCollision->GetComponentLocation(), FQuat::Identity,
+			ECC_WorldStatic, FCollisionShape::MakeSphere(Radius * 0.95f), Params))
+		{
+			FVector SafeLoc;
+			if (FindRecentSafeSample(SafeLoc))
+			{
+				SetActorLocation(SafeLoc, false, nullptr, ETeleportType::TeleportPhysics);
+				bUsedSafeFallback = true;
+			}
 		}
 	}
-	const FVector Target = Loc + Dir * (Radius * 1.5f);
-	SetActorLocation(Target, false, nullptr, ETeleportType::TeleportPhysics);
+
+	// 第 4 步:小离面速度 + 保留切向速度(零速会立刻又沉回接触面)。
+	FVector EscapeVelocity = FVector::VectorPlaneProject(VelocityBeforeRescue, EscapeDir);
+	if (!EscapeDir.IsNearlyZero())
+	{
+		EscapeVelocity += EscapeDir * 150.0f;
+	}
+	BallCollision->SetPhysicsLinearVelocity(EscapeVelocity);
+
 	StuckBuriedSeconds = 0.0f;
 	LastStuckRescueTime = Now;
-	UE_LOG(LogTemp, Log, TEXT("[GSStuckRescue] buried=1 speed=%.0f from=(%.0f,%.0f,%.0f) to=(%.0f,%.0f,%.0f)"),
-		SpeedCm, Loc.X, Loc.Y, Loc.Z, Target.X, Target.Y, Target.Z);
+	UE_LOG(LogTemp, Log,
+		TEXT("[GSStuckRescue] RESCUE depth=%.1f mtd=%.1f moved=%.1f safe=%d riding=%d capture=%d at=(%.0f,%.0f,%.0f)"),
+		MaxDepthCm, MtdDistCm, TotalMovedCm, bUsedSafeFallback ? 1 : 0, bWasRiding ? 1 : 0, bWasCapturing ? 1 : 0,
+		Loc.X, Loc.Y, Loc.Z);
 }
 
 void AGSRollingBallPawn::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
+	// 卡死救援必须**先于**骑行/吸附驱动运行:那两个函数每帧会用 SetPhysicsLinearVelocity
+	// 写入 500cm/s 的指令速度,排在它们后面的救援读到的是指令值而非物理解算结果
+	// ⇒ 判"停住"永远失败(2026-10-07 专家定位的确定性 bug)。这里先救援、再推进驱动。
+	UpdateStuckRescue(DeltaSeconds);
 	// 转向器过渡先于移动/相机推进:三者读到同一个平滑重力方向。
 	UpdateGravityRedirect(DeltaSeconds);
 	// 特殊滑梯吸附同理:先推进吸附(它自己驱动速度),再走移动/相机。
 	UpdateFaceCapture(DeltaSeconds);
-	// 卡死救援:被埋进美术空腔时把球顶出来(正常玩法不触发,见函数注释)。
-	UpdateStuckRescue(DeltaSeconds);
 
 	if (bInputLocked)
 	{
