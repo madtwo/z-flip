@@ -1473,15 +1473,54 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 		// 这里必须让路,否则刹车/输入会把球从面上拽下来。
 		return;
 	}
-	// 楼梯吸力(2026-09-13 用户需求;2026-09-15 用户要求"只改点名的那一段楼梯"后重构):
+	// ================= 贴附/粘性(2026-10-07 用户需求)=================
+	// "小球在平地以及墙上的时候,要与地面或者墙体有粘性,也就是不能平地飞起来。"
+	// 探针沿**当前重力方向**打 —— 重力转到侧面后"墙"就是局部的地面,同一条路径,不需要分开处理。
+	// 楼梯段让路(楼梯有自己的吸附+防飞)。放在楼梯段之前,让楼梯系统有最后一句话权。
+	if (bGroundHugEnabled && BallCollision->IsSimulatingPhysics())
+	{
+		const FVector HugDown = GetActiveGravityDirection().GetSafeNormal();
+		const float HugR = BallCollision->GetScaledSphereRadius();
+		if (!HugDown.IsNearlyZero() && HugR > 0.0f)
+		{
+			const FVector HugFrom = BallCollision->GetComponentLocation();
+			FHitResult HugHit;
+			FCollisionQueryParams HugParams(SCENE_QUERY_STAT(GSGroundHug), false, this);
+			if (GetWorld() && GetWorld()->LineTraceSingleByChannel(HugHit, HugFrom,
+				HugFrom + HugDown * (HugR + GroundHugReachCm), ECC_Visibility, HugParams)
+				&& !MatchesStairTag(HugHit.GetActor(), StairStickNameTag))
+			{
+				const FVector HugN = HugHit.ImpactNormal.GetSafeNormal();
+				const FVector HugV = BallCollision->GetPhysicsLinearVelocity();
+				// 沿法向的速度:>0 = 正在离开这个面。
+				const float Sep = FVector::DotProduct(HugV, HugN);
+				// 快速离面 = 弹跳/弹射,是玩法,撒手不管;剩下的才粘。
+				if (Sep < GroundHugMaxSepSpeedCm)
+				{
+					// ① 削掉正在离开的那部分速度(小跳直接抹平)。
+					if (Sep > 0.0f && GroundHugKill > 0.0f)
+					{
+						BallCollision->SetPhysicsLinearVelocity(HugV - HugN * (Sep * GroundHugKill));
+					}
+					// ② 朝面压一个加速度 —— "粘性"本体。
+					if (GroundHugAccelCm > 0.0f)
+					{
+						BallCollision->AddForce(-HugN * GroundHugAccelCm, NAME_None, true);
+					}
+				}
+			}
+		}
+	}
+
+	// 楼梯吸力(2026-09-13 用户需求;2026-09-15 "只改点名的那一段楼梯";2026-10-07 分向重构):
 	//   基础:踩在楼梯上给一个朝支撑面的加速度,把球"摁"在台阶上、不被棱角弹飞。只对命中
 	//         StairStickNameTag(默认 "Stairs")的件生效,其它任何表面零影响。
 	//   强化:命中 StairStickBoostNameTag(默认 Linear3~6 = 用户点名的那段长楼梯)时,吸力与
-	//         影响区都用 Boost* 的更大值,并额外吃两道**削速度**硬约束防飞(光给力治不住
-	//         "被台阶棱角顶飞":力要等速度抵消,球早飞了)。
-	//   ⚠ 削速度**只在下坡趋势时**生效。爬台阶必须靠向上的速度,削了就直接爬不动
-	//     (用户实测"其他楼梯都上坡上不了了");趋势(垂直速度指数均值)能区分"爬坡 vs 被顶飞",
-	//     瞬时速度方向区分不了。
+	//         影响区都用 Boost* 的更大值。
+	//   ⚠ 削速度(限速/削法向/削上抛)只能**在守**时开:爬台阶必须靠向上的速度,削了就直接爬不动
+	//     (用户实测"其他楼梯都上坡上不了了")。能区分"爬坡 vs 被顶飞"的只有方向。
+	//     两个相反的要求(爬得上 / 下不飞)由此**互斥**地落在"在爬/在守"两侧,不抢同一根旋钮。
+	//     方向的判据 = 垂直速度趋势,理由见 .h(上一版的"前方探针"实测是个抖到不能用的信号)。
 	if (bStairStickEnabled && BallCollision->IsSimulatingPhysics())
 	{
 		const FVector StickDown = GetActiveGravityDirection().GetSafeNormal();
@@ -1489,11 +1528,11 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 		{
 			const FVector StickFrom = BallCollision->GetComponentLocation();
 			const float BallR = BallCollision->GetScaledSphereRadius();
-			// 垂直速度指数均值 → "现在是不是在下坡"。上坡(上升趋势)时 DescendGate=0,永不削速度。
+			// 垂直速度指数均值(沿**重力反方向**投影,不是世界 Z —— 重力转过去以后世界 Z 没意义)。
+			// 这是唯一的"在爬/在守"判据:正 = 在往上走。平滑量,所以不会像探针那样逐帧翻。
 			const float TrendAlpha = FMath::Clamp(DeltaSeconds * 6.0f, 0.0f, 1.0f);
 			StairVzTrendCm = FMath::Lerp(StairVzTrendCm,
-				BallCollision->GetPhysicsLinearVelocity().Z, TrendAlpha);
-			const float DescendGate = FMath::Clamp(-StairVzTrendCm / 200.0f, 0.0f, 1.0f);
+				-FVector::DotProduct(BallCollision->GetPhysicsLinearVelocity(), StickDown), TrendAlpha);
 
 			FHitResult StickHit;
 			FCollisionQueryParams StickParams(SCENE_QUERY_STAT(GSStairStick), false, this);
@@ -1528,6 +1567,78 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 				}
 			}
 
+			// ---------- 判定:球此刻是在往上爬,还是在往下/平着走 ----------
+			// 只在踩在楼梯上时更新。**离开楼梯时故意不复位** —— 端点延续吸附还在跑,
+			// 坡顶那几帧也必须保持"已经在守";这里复位成"在爬"就正好把球抛出去。
+			// 等记忆真正过期(下面 bHasStairContact 熄灭)再清回 false。
+			if (bOnStairs)
+			{
+				// 判定:**只看平滑后的垂直速度趋势**。
+				// 上一版这里用的是"前方 120cm 再打一条射线比高度",我当时的理由是"几何事实不会抖"。
+				// 2026-10-07 PIE 实测证伪:方块地形上那条射线逐帧落在踏面/立面/缝隙的不同位置,
+				// 622 帧日志里 climb 翻了 84 次、中位持续 3 帧(约 50ms)。门这么抖,防飞就时开时关,
+				// 结果是**爬不上去也防不住飞**。同一段日志换成趋势只有 22 次翻转、中位 28 帧。
+				// 趋势还顺带管住了坡顶(衰减到 0 → 防飞接管 → 球被按在顶面)和下坡(转负 → 防飞全开)。
+				const FVector StickVel = BallCollision->GetPhysicsLinearVelocity();
+				const FVector HorizVel = StickVel - StickDown * FVector::DotProduct(StickVel, StickDown);
+				if (HorizVel.SizeSquared() > 900.0f)
+				{
+					StairTravelDir = HorizVel.GetSafeNormal();
+				}
+				bClimbAhead = StairVzTrendCm >= StairTrendAscendCm;
+
+				// 探针降级为**纯测量**:只为爬坡助力提供前方落差(定目标速度与坡角)。
+				// 量有噪声无所谓——它只决定一个力的大小,不参与开关。测不到就按 0。
+				StairAheadRiseMeasuredCm = 0.0f;
+				if (GetWorld() && !StairTravelDir.IsNearlyZero())
+				{
+					const FVector AheadFrom = StickFrom + StairTravelDir * StairAheadProbeCm;
+					FHitResult AheadHit;
+					if (GetWorld()->LineTraceSingleByChannel(AheadHit, AheadFrom,
+						AheadFrom + StickDown * (BallR + StairAheadProbeDepthCm), ECC_Visibility, StickParams))
+					{
+						StairAheadRiseMeasuredCm =
+							FVector::DotProduct(AheadHit.Location - StickHit.Location, -StickDown);
+					}
+				}
+			}
+
+			// "在守"才为 1。"在爬"时整条防飞链全关 —— 这是两个相反要求能共存的关键。
+			const float ProtectGate = bClimbAhead ? 0.0f : 1.0f;
+
+			// "在守"时限速,**贴地和腾空都要限**。台阶不连续,不限速必跳步;而"飞出去"
+			// 恰恰发生在**离地之后** —— 腾空时没有任何接触约束。原先把限速只写在贴地
+			// 分支里,等于球一飞起来就彻底没管了(2026-10-07 用户报"下楼梯时会飞出去")。
+			const float StairMaxSpeedCm = bBoosted ? StairStickBoostMaxSpeedCm : StairStickMaxSpeedCm;
+			const auto CapStairSpeed = [this, StickDown, StairMaxSpeedCm, ProtectGate]()
+			{
+				if (ProtectGate <= 0.0f || StairMaxSpeedCm <= 0.0f)
+				{
+					return;
+				}
+				const FVector V = BallCollision->GetPhysicsLinearVelocity();
+				const FVector Vertical = StickDown * FVector::DotProduct(V, StickDown);
+				const FVector Planar = V - Vertical;
+				const float PlanarSpeed = Planar.Size();
+				if (PlanarSpeed > StairMaxSpeedCm)
+				{
+					BallCollision->SetPhysicsLinearVelocity(
+						Vertical + Planar * (StairMaxSpeedCm / PlanarSpeed));
+				}
+			};
+
+			// 楼梯上忽略 profile 的额外重力(2026-10-07 用户需求):额外重力把球压得太死,
+			// 而爬台阶靠的是被棱角弹起来的那一下(高度 ∝ v²/g)。**只在"在爬"时**退回
+			// StairGravityScale —— "在守"要的正是压住球、别飞出去。
+			// 改的是 GravityBody->GravityScale 而不是另加一个反力:落地响应算阈值时读的
+			// 也是这个值(GetLandingGravityAccelerationCm = 管理器 g × 它),改它两边才自洽。
+			if (GravityBody)
+			{
+				const float ProfileScale = BallProfile ? BallProfile->GravityScale : 1.0f;
+				const float StairScale = BallProfile ? BallProfile->StairGravityScale : 1.0f;
+				GravityBody->GravityScale = (bOnStairs && bClimbAhead) ? StairScale : ProfileScale;
+			}
+
 			if (bOnStairs)
 			{
 				// 记下"确实踩在楼梯上"的位置与时刻:离开后的一小块靠它继续吸。
@@ -1538,11 +1649,12 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 				if (bStairDebugLog)
 				{
 					const FVector DbgV = BallCollision->GetPhysicsLinearVelocity();
-					UE_LOG(LogTemp, Log, TEXT("[GSStair] t=%.3f on=1 boost=%d pos=(%.0f,%.0f,%.0f) v=(%.0f,%.0f,%.0f) sup=%d trend=%.0f gate=%.2f n=(%.2f,%.2f,%.2f)"),
-						GetWorld()->GetTimeSeconds(), bBoosted ? 1 : 0, StickFrom.X, StickFrom.Y, StickFrom.Z,
+					UE_LOG(LogTemp, Log, TEXT("[GSStair] t=%.3f on=1 boost=%d climb=%d ahead=%.0f pos=(%.0f,%.0f,%.0f) v=(%.0f,%.0f,%.0f) sup=%d trend=%.0f gate=%.2f n=(%.2f,%.2f,%.2f)"),
+						GetWorld()->GetTimeSeconds(), bBoosted ? 1 : 0, bClimbAhead ? 1 : 0,
+						StairAheadRiseMeasuredCm, StickFrom.X, StickFrom.Y, StickFrom.Z,
 						DbgV.X, DbgV.Y, DbgV.Z,
 						(LandingResponse && LandingResponse->IsSupported()) ? 1 : 0,
-						StairVzTrendCm, DescendGate,
+						StairVzTrendCm, ProtectGate,
 						StickHit.ImpactNormal.X, StickHit.ImpactNormal.Y, StickHit.ImpactNormal.Z);
 				}
 
@@ -1555,8 +1667,9 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 					const float AirborneAccel = bBoosted
 						? StairStickBoostAirborneAccelCm : StairStickAirborneAccelCm;
 					BallCollision->AddForce(StickDown * AirborneAccel, NAME_None, true);
-					// ② 上抛分量当场归零(仅点名楼梯 + 下坡趋势)。
-					const float LiftKill = bBoosted ? (StairStickBoostLiftKill * DescendGate) : 0.0f;
+					// ② 上抛分量当场归零(**在守**时对所有楼梯生效,不只是点名楼梯)。
+					const float LiftKill =
+						(bBoosted ? StairStickBoostLiftKill : StairStickLiftKill) * ProtectGate;
 					if (LiftKill > 0.0f)
 					{
 						const FVector V = BallCollision->GetPhysicsLinearVelocity();
@@ -1567,6 +1680,8 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 							BallCollision->SetPhysicsLinearVelocity(V - LiftDir * (LiftSpeed * LiftKill));
 						}
 					}
+					// ③ 腾空也要限速 —— "飞出去"就发生在这里(见上面 CapStairSpeed 的说明)。
+					CapStairSpeed();
 				}
 				else
 				{
@@ -1581,22 +1696,12 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 					}
 					const float ContactAccel = bBoosted ? StairStickBoostAccelCm : StairStickAccelCm;
 					BallCollision->AddForce(StickDown * ContactAccel * StickScale, NAME_None, true);
-					// ③ 下坡限速(仅点名楼梯 + 下坡趋势):见头文件说明——台阶不连续,不限速必跳步。
-					if (bBoosted && DescendGate > 0.0f && StairStickBoostMaxSpeedCm > 0.0f)
-					{
-						const FVector V = BallCollision->GetPhysicsLinearVelocity();
-						const FVector Vertical = StickDown * FVector::DotProduct(V, StickDown);
-						FVector Planar = V - Vertical;
-						const float PlanarSpeed = Planar.Size();
-						if (PlanarSpeed > StairStickBoostMaxSpeedCm)
-						{
-							Planar *= StairStickBoostMaxSpeedCm / PlanarSpeed;
-							BallCollision->SetPhysicsLinearVelocity(Vertical + Planar);
-						}
-					}
+					// ③ 限速(**在守时**对所有楼梯生效;点名楼梯用 Boost* 值)。
+					CapStairSpeed();
 
-					// ① 离面法向分量削掉(仅点名楼梯 + 下坡趋势)。
-					const float NormalKill = bBoosted ? (StairStickBoostNormalKill * DescendGate) : 0.0f;
+					// ① 离面法向分量削掉(**在守时**对所有楼梯生效;点名楼梯用 Boost* 强度)。
+					const float NormalKill =
+						(bBoosted ? StairStickBoostNormalKill : StairStickNormalKill) * ProtectGate;
 					if (NormalKill > 0.0f)
 					{
 						const FVector SurfaceNormal = StickHit.ImpactNormal.GetSafeNormal();
@@ -1606,6 +1711,34 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 						{
 							BallCollision->SetPhysicsLinearVelocity(
 								V - SurfaceNormal * (NormalSpeed * NormalKill));
+						}
+					}
+				}
+
+				// ---------- 爬坡助力(要求:能爬上楼梯)----------
+				// 爬台阶有一半时间在腾空,而腾空时驱动只剩 AirControlAccelerationCm,远不够翻过
+				// 下一级 —— 这就是"爬不上去"的机制。这里只补**不够的那部分**:沿坡向把速度顶到
+				// v_target = StairClimbSpeedFactor × √(2·g_s·前方台阶高)。到速度立刻不推 →
+				// 补差而不是常驻推力,平地/缓坡/下坡零影响。
+				// **只在"在爬"时生效** —— 这是两个相反要求能共存的关键。
+				if (bStairAssistEnabled && bClimbAhead)
+				{
+					const float ManagerG = GravityManager ? GravityManager->GravityAccelerationCm : 1600.0f;
+					const float BodyScale = GravityBody ? GravityBody->GravityScale : 1.0f;
+					const float StairG = FMath::Max(ManagerG * FMath::Max(BodyScale, 0.0f), 1.0f);
+					const float StepHeight = FMath::Max(StairAheadRiseMeasuredCm, StairClimbMinHeightCm);
+					const float TargetSpeed = StairClimbSpeedFactor * FMath::Sqrt(2.0f * StairG * StepHeight);
+					// 坡向 = 水平行进方向 + 按前方落差估的仰角(限幅最多 45°,别把球往上拽)。
+					const float Slope = FMath::Clamp(
+						StairAheadRiseMeasuredCm / FMath::Max(StairAheadProbeCm, 1.0f), 0.0f, 1.0f);
+					FVector ClimbDir = StairTravelDir - StickDown * Slope;
+					if (!ClimbDir.IsNearlyZero())
+					{
+						ClimbDir.Normalize();
+						const FVector ClimbV = BallCollision->GetPhysicsLinearVelocity();
+						if (FVector::DotProduct(ClimbV, ClimbDir) < TargetSpeed)
+						{
+							BallCollision->AddForce(ClimbDir * StairClimbAssistAccelCm, NAME_None, true);
 						}
 					}
 				}
@@ -1627,9 +1760,9 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 				if (bNearStairEnd)
 				{
 					BallCollision->AddForce(StickDown * EndAccel, NAME_None, true);
-					// 点名楼梯的端点外同样削上抛分量(仅下坡趋势)。
-					const float LiftKill = bLastStairBoosted
-						? (StairStickBoostLiftKill * DescendGate) : 0.0f;
+					// 端点外同样削上抛分量 + 限速(在守时)。
+					const float LiftKill =
+						(bLastStairBoosted ? StairStickBoostLiftKill : StairStickLiftKill) * ProtectGate;
 					if (LiftKill > 0.0f)
 					{
 						const FVector V = BallCollision->GetPhysicsLinearVelocity();
@@ -1640,6 +1773,7 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 							BallCollision->SetPhysicsLinearVelocity(V - LiftDir * (LiftSpeed * LiftKill));
 						}
 					}
+					CapStairSpeed();
 					if (bStairDebugLog)
 					{
 						const FVector DbgV = BallCollision->GetPhysicsLinearVelocity();
@@ -1647,13 +1781,17 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 							NowSec, bLastStairBoosted ? 1 : 0, StickFrom.X, StickFrom.Y, StickFrom.Z,
 							DbgV.X, DbgV.Y, DbgV.Z,
 							FVector::Dist(StickFrom, LastStairContactLocation),
-							NowSec - LastStairContactTime, DescendGate);
+							NowSec - LastStairContactTime, ProtectGate);
 					}
 				}
 				else
 				{
 					// 走远/超时 → 记忆失效:楼梯吸力绝不会漏到别的表面上。
 					bHasStairContact = false;
+					// 判定也一起复位(上面"离开楼梯时故意不复位"的注释说的就是等这里)。
+					bClimbAhead = false;
+					StairAheadRiseMeasuredCm = 0.0f;
+					StairTravelDir = FVector::ZeroVector;
 				}
 			}
 		}

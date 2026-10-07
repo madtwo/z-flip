@@ -105,6 +105,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Gravity")
 	float GravityScale = 1.0f;
 
+	// 踩在楼梯上时改用这个倍率(替代 GravityScale)。爬台阶靠的是被台阶棱角弹起来的那一下,
+	// 而弹跳高度 ∝ v²/g —— g 调大就等于把爬楼能力砍掉,所以楼梯上把额外重力抹掉。
+	// 1.0 = 完全忽略额外重力(回到未调 g 的手感);调小则楼梯上更"黏"。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Gravity", meta = (ClampMin = "0.0"))
+	float StairGravityScale = 1.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Gravity", meta = (ClampMin = "0.0"))
 	float GravityAxisDragHz = 0.0f;
 
