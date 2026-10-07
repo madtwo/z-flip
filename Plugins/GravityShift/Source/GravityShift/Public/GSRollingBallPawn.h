@@ -295,14 +295,17 @@ public:
 	//   · 且**只在下坡趋势时**吃两道削速度硬约束(防飞);
 	// 没命中的楼梯一切照基础值走,且**永不削速度**——爬坡要靠"向上的速度"爬上台阶,
 	// 削了就直接爬不动(用户实测"其他楼梯都上坡上不了了")。
+	// 2026-10-07: 追加 SM_Walls_Stairs_1(美术馆那段楼梯,标签不含 Linear ⇒ 只吃 1500 基础助力,实测爬不上);
+	// 再放宽为整类 SM_Walls_Stairs*(美术楼梯全部吃强化档: 爬梯力 4200/3000 + 顶部延续 1400/280cm/0.8s),
+	// 依旧只作用于"点名楼梯", 平地与其它非楼梯表面不受影响。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement")
-	FString StairStickBoostNameTag = TEXT("Linear3,Linear4,Linear5,Linear6");
+	FString StairStickBoostNameTag = TEXT("Linear3,Linear4,Linear5,Linear6,SM_Walls_Stairs");
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
-	float StairStickBoostAccelCm = 3200.0f;
+	float StairStickBoostAccelCm = 4200.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
-	float StairStickBoostAirborneAccelCm = 2200.0f;
+	float StairStickBoostAirborneAccelCm = 3000.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
 	float StairStickBoostEndAccelCm = 1400.0f;
@@ -375,9 +378,12 @@ public:
 	bool bStairAssistEnabled = true;
 
 	// 沿重力反方向的垂直速度趋势(cm/s)高过这个值才算"在爬"。45° 坡上 370cm/s 时该值约 260,
-	// 平地滚动时在 0 附近摆 —— 40 两边都留足了余量。
+	// 平地滚动时在 0 附近摆。
+	// 2026-10-07: 40 → 0(用户"起步就上不去": 40 要求球**已经在往上冲**才开助力,慢速/静止起步
+	// 永远够不到 ⇒ 助力只能锦上添花、不能推上路。本块只在"脚探针命中楼梯"时执行,平地的 0 附近
+	// 摆动不影响任何东西;下坡趋势转负仍然归"在守"(防飞),所以防飞语义不变。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement")
-	float StairTrendAscendCm = 40.0f;
+	float StairTrendAscendCm = 0.0f;
 
 	// ---- 前探针:**只用来量落差**,不参与判定(判定见上),所以抖动无害 ----
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
