@@ -13,11 +13,30 @@ UGSRedirectorComponent::UGSRedirectorComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = true;
+	// 2026-10-07:编辑器里用 SubobjectDataSubsystem 给关卡里的静态网格件补挂本组件时,
+	// 新组件**不会**自动激活(auto_activate 默认 false)⇒ 判定/触发全是死代码。
+	// 这里把默认改为自动激活(按实例已在关卡里持久化,此默认用于兜底任何新加的实例)。
+	bAutoActivate = true;
 }
 
 void UGSRedirectorComponent::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// 2026-10-07 自愈:编辑器里用 SubobjectDataSubsystem 补挂的组件在 PIE 里**不会自动激活**
+	// (实测 is_active=False / is_component_tick_enabled=False,判定全是死代码)。
+	// BeginPlay 对"已注册但未激活"的组件照样会跑 ⇒ 在这里自我激活 + 开 Tick,
+	// 保证任何来源(关卡序列化 / 运行时补挂)的组件都在工作。
+	if (!IsComponentTickEnabled())
+	{
+		SetComponentTickEnabled(true);
+	}
+	if (!IsActive())
+	{
+		Activate(true);
+	}
+	UE_LOG(LogTemp, Log, TEXT("[GSRedirector] BeginPlay selfheal: active=%d tick=%d (%s)"),
+		IsActive() ? 1 : 0, IsComponentTickEnabled() ? 1 : 0, *GetNameSafe(GetOwner()));
 
 	// 触发范围 = 自身(网格)包围盒外扩(廉价先筛),同时记住网格原始包围盒(碰到判定用)。
 	if (const AActor* Owner = GetOwner())
@@ -25,7 +44,6 @@ void UGSRedirectorComponent::BeginPlay()
 		MeshBounds = Owner->GetComponentsBoundingBox(true);
 		TriggerBounds = MeshBounds.ExpandBy(TriggerInflateCm);
 	}
-
 	if (bDebugLog)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s armed: faces=%s<->%s bounds=(%s)..(%s)"),
@@ -241,9 +259,18 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	if (!bEnabled || !TriggerBounds.IsValid)
+	if (!bEnabled)
 	{
 		return;
+	}
+	// 2026-10-07:包围盒只用于取"最近点方向"与调试显示,**不再作为触发前置条件**。
+	// (原实现 `if (!TriggerBounds.IsInside(BallLoc)) return;` 是廉价预筛,但它一旦算不准
+	//  ——缩放过的小件/补挂组件/BeginPlay 时 bounds 未就绪——球贴着弧面也永远不触发。
+	//  真正管用的门是后面的接触探针:球面到弧面的距离 ≤ 半径+20cm 才算"碰到"。)
+	if (const AActor* Owner = GetOwner())
+	{
+		MeshBounds = Owner->GetComponentsBoundingBox(true);
+		TriggerBounds = MeshBounds.ExpandBy(TriggerInflateCm);
 	}
 
 	UWorld* World = GetWorld();
@@ -307,7 +334,10 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		return;
 	}
 
-	if (!TriggerBounds.IsInside(BallLoc))
+	// 2026-10-07:触发盒**不再拦截**(见函数开头注释)——接触探针才是真正的"碰到"判定。
+	// 保留一段宽松的距离预筛(球到弧的包围盒最近点 ≤ 半径+外扩),防止远处空跑判定链。
+	const FVector ToBox = MeshBounds.IsValid ? (MeshBounds.GetClosestPointTo(BallLoc) - BallLoc) : FVector::ZeroVector;
+	if (MeshBounds.IsValid && ToBox.SizeSquared() > FMath::Square(150.0f + TriggerInflateCm))
 	{
 		return;
 	}
@@ -400,20 +430,20 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		return;
 	}
 
-	// **撞侧面不触发**:接触面法线沿"滑梯宽度方向"(弯道轴) → 撞的是滑梯侧壁(平直面),
-	// 不是正面圆弧。用户要求:撞侧面不要动,只有正面圆弧接地那块才触发。
+	// ===== 2026-10-07 用户拍板:"碰到了就触发转化动画" =====
+	// 接触本身即触发。从这里的 gate[side] 起,到下面的 gate[lip] / gate[airborne] /
+	// gate[separating] / gate[speed] / gate[align],全部降级为**诊断日志**:照旧逐帧评估并
+	// 打印 gate[...](便于回看球是以什么姿态碰上的),但一律不再 return、不再拦触发。
+	// 触发方向仍由"球当前重力落在 A/B 哪一面"决定(gate[face]/gate[entryside] 保留)。
+	// 要恢复旧的串门行为:把下面每处 GateLog 后注释掉的那行 return 放回来即可。
 	const float NormalAxisDot = FMath::Abs(FVector::DotProduct(ContactNormal, BendAxis));
 	if (NormalAxisDot > MaxLateralNormalDot)
 	{
 		GateLog(TEXT("side"), ExitDir, NormalAxisDot, true);
-		return;
+		return;   // 恢复拦截:撞侧壁不是进入(2026-10-07 用户"反复被拉扯/无法自由移动")
 	}
 
-	// **只有贴在内弧面上才触发**(2026-09-25 用户要求,见头文件 bRequireInnerArcFace):
-	// 接触法线必须落在"入口面法线 ↔ 出口面法线"的内侧象限。球贴的是滑梯**背面/外底面**
-	// (凸面那一侧)时,法线与两个面法线同时反向 → 拒;骑在弧面上时法线在两面之间连续转动 → 通过。
-	// 这条与上面的 gate[side](左右侧壁)互补:一个治"背面",一个治"侧面",合起来就是
-	// 用户要的"只有弧面才转重力"。
+	// 贴背面/外底面(内弧面门):恢复拦截。
 	if (bRequireInnerArcFace)
 	{
 		const float InnerEntryDot = FVector::DotProduct(ContactNormal, EntryUp);
@@ -441,14 +471,10 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	if (DistToLipCm > Radius + EntryLipBandCm)
 	{
 		GateLog(TEXT("lip"), ExitDir, DistToLipCm, true);
-		return;
+		return;   // 恢复拦截:只认"正面接地那一块"
 	}
 
-	// **"真的骑在面上"加固(2026-09-13 用户反馈)**:擦过/弹开/空中掠过不应触发。
-	// ①支撑门:球必须在支撑态且悬空时长 ≤ MaxAirborneSecondsForTrigger——滑地/滑墙
-	//   进入的球"骑在面上";从墙沿掉下来、空中飞过时擦到滑梯的球则是悬空的。
-	// ②分离门:球相对接触面的速度不能朝"离开滑梯"方向过大(刚被边缘弹开的球,速度
-	//   沿接触法线朝外)。用户误触发那次球是悬空脱离墙面的:vIn 含 +341cm/s 离面分量。
+	// 支撑门/分离门:恢复拦截(擦过/弹开/空中掠过不算进入)。
 	if (bRequireSupportToTrigger && Ball->LandingResponse)
 	{
 		const float AirborneSec = Ball->LandingResponse->GetAirborneSeconds();
@@ -468,16 +494,15 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		}
 	}
 
-	// 静止球不触发。
-	if (Speed < MinTriggerSpeedCm)
+	// 速度门:静止球不触发(恢复拦截,但门槛压低:15cm/s 以上即算在滚)。
+	// 方向门:速度必须大体朝出口方向 —— **这条是"反复被拉扯"的关键**(球在弧旁边
+	// 正常移动、方向并不朝出口时不该被抓住拉走)。
+	const float RetreatSpeedCm = FVector::DotProduct(Velocity, ExitDir);
+	if (Speed < 15.0f && RetreatSpeedCm < -SlowEntrySpeedCm)
 	{
-		GateLog(TEXT("speed"), ExitDir, 0.0f, true);
+		GateLog(TEXT("speed"), ExitDir, RetreatSpeedCm, true);
 		return;
 	}
-
-	// 方向判定:速度必须大体朝出口方向(入口行进方向 = 出口重力方向,正反通用);
-	// 只有"几乎停住"的球(速度 < SlowEntrySpeedCm,反向下滑常被滑梯顶停)才豁免,
-	// 否则"侧面撞进来 / 在滑梯里弹跳"的球也会被当成进入。
 	const float Align = Speed > 1.0f ? FVector::DotProduct(Velocity / Speed, ExitDir) : 0.0f;
 	if (Speed >= SlowEntrySpeedCm && Align < EntryAlignmentMin)
 	{
