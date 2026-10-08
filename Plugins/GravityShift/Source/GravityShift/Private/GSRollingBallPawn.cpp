@@ -1454,6 +1454,560 @@ bool AGSRollingBallPawn::MatchesStairTag(const AActor* Actor, const FString& Tag
 	return false;
 }
 
+// ============================================================================
+// 墙装楼梯专项(2026-10-08,专家方案 Q1/Q2/Q3;证据见 STAIR_WALL_PACKAGE.zip)
+// ----------------------------------------------------------------------------
+// 病灶(实测):主图墙装楼梯 SM_Walls_Stairs_10/11/12 —— 踏面法线(localZ)= 世界 +X,
+// 该段重力 = -X,爬升方向 = -localY(世界 ±Y/±Z)。失败链:
+//   ① 旧识别只沿重力打一条线(球脚下 = 墙/箱子,楼梯在**前方**)⇒ 助力一次都不开;
+//   ② 就算开了,旧力模型在墙上也错:StickDown(-X)在 43° 倒角上有下坡分量,且坡角用
+//      AheadRise/120 估出 ~17°(真实 43°);
+//   ③ 玩家输入被投影到 ⊥重力平面 ⇒ 输入**永远没有 +X 分量**,球没有任何"离墙"方向的
+//      推力,上台阶只能靠撞棱弹起 —— 撞不动就滑回来(实测 +Y 243cm/s → 25cm/s)。
+// 本实现:用**几何事实**建坐标系(mesh 局部轴),力沿真坡向/真法线给,玩家输入只当"意图"。
+// ============================================================================
+
+bool AGSRollingBallPawn::IsWallStairComponent(const UPrimitiveComponent* Comp)
+{
+	const UStaticMeshComponent* SMC = Cast<UStaticMeshComponent>(Comp);
+	UStaticMesh* Mesh = SMC ? SMC->GetStaticMesh() : nullptr;
+	if (!Mesh)
+	{
+		return false;
+	}
+	// 缓存:同一批楼梯件共用少数几个网格资产,避免每帧对每个 overlap 结果做字符串匹配。
+	if (const bool* Cached = WallStairMeshTagCache.Find(Mesh))
+	{
+		return *Cached;
+	}
+	const bool bMatch = Mesh->GetPathName().Contains(WallStairMeshTag);
+	WallStairMeshTagCache.Add(Mesh, bMatch);
+	return bMatch;
+}
+
+void AGSRollingBallPawn::ResetWallStairState()
+{
+	WallStairComp = nullptr;
+	WallStairState = 0;
+	WallStairStateEnterTime = -1000.0f;
+	WallStairDwellStart = -1000.0f;
+	WallStairLastSeenTime = -1000.0f;
+	WallStairLastHitTime = -1000.0f;
+	WallStairLastHitNormal = FVector::ZeroVector;
+	WallStairSurfaceNormal = FVector::ZeroVector;
+	WallStairTreadNormal = FVector::ZeroVector;
+	WallStairClimbAxis = FVector::ZeroVector;
+	WallStairClimbDir = FVector::ZeroVector;
+	WallStairRiseCm = 0.0f;
+	WallStairRunCm = 0.0f;
+	WallStairAheadRiseCm = 0.0f;
+	WallStairDistToTopCm = 0.0f;
+	WallStairProgressCm = 0.0f;
+	WallStairTopFrames = 0;
+	WallStairLostProbeTime = 0.0f;
+	bWallStairGuardActiveThisFrame = false;
+	WallStairGuardDownhillDir = FVector::ZeroVector;
+	WallStairGuardAllowedDownSpeedCm = 0.0f;
+	WallStairGuardAccelUsed = 0.0f;
+	bWallStairClimbActiveThisFrame = false;
+	WallStairClimbAxisDrive = FVector::ZeroVector;
+	WallStairClimbInputScale = 1.0f;
+	// ⚠ TopCompleted 锁(bWallStairTopLocked 等)**故意不在这里清** —— 它有自己的解除条件
+	// (退回一定距离 / 换件 / 重力改变),见 UpdateWallStairAssist 开头。
+	// 专家 Q3:复位必须连旧趋势量一起清,绝不能跨楼梯件/跨 PIE 残留。
+	StairRiseTrendCm = 0.0f;
+	StairVzTrendCm = 0.0f;
+	StairAheadRiseMeasuredCm = 0.0f;
+	StairTravelDir = FVector::ZeroVector;
+	bClimbAhead = false;
+}
+
+bool AGSRollingBallPawn::UpdateWallStairAssist(float DeltaSeconds, const FVector& StickDown,
+	const FHitResult& SupportHit, bool bSupportHitValid)
+{
+	bWallStairGuardActiveThisFrame = false;
+	WallStairGuardDownhillDir = FVector::ZeroVector;
+	bWallStairClimbActiveThisFrame = false;
+	WallStairClimbInputScale = 1.0f;
+
+	UWorld* World = GetWorld();
+	if (!World || !BallCollision || !bWallStairEnabled)
+	{
+		return false;
+	}
+	const float NowSec = World->GetTimeSeconds();
+	const float BallR = BallCollision->GetScaledSphereRadius();
+	const FVector BallLoc = BallCollision->GetComponentLocation();
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(GSWallStairSense), false, this);
+
+	// ---- 1) 邻域:找最近的"墙装楼梯件",并验收 可骑 + 非水平安装 ----
+	UPrimitiveComponent* BestComp = nullptr;
+	FVector BestTreadN = FVector::ZeroVector;
+	FVector BestAxis = FVector::ZeroVector;
+	float BestDistSq = TNumericLimits<float>::Max();
+	TArray<FOverlapResult> Overlaps;
+	if (World->OverlapMultiByChannel(Overlaps, BallLoc, FQuat::Identity, ECC_Visibility,
+		FCollisionShape::MakeSphere(WallStairSenseRadiusCm), Params))
+	{
+		for (const FOverlapResult& Over : Overlaps)
+		{
+			UPrimitiveComponent* Comp = Over.GetComponent();
+			if (!Comp || !IsWallStairComponent(Comp))
+			{
+				continue;
+			}
+			const FTransform T = Comp->GetComponentTransform();
+			// mesh 约定(专家 Q1,三件实测全体符合):localZ = 踏面法线;爬升 = -localY。
+			const FVector TreadN = T.TransformVectorNoScale(FVector(0.0, 0.0, 1.0)).GetSafeNormal();
+			const FVector Axis = (-T.TransformVectorNoScale(FVector(0.0, 1.0, 0.0))).GetSafeNormal();
+			if (TreadN.IsNearlyZero() || Axis.IsNearlyZero())
+			{
+				continue;
+			}
+			// ① 当前重力下必须真的"可骑"(踏面法线 ≈ -重力),否则这套辅助不适用。
+			if (FVector::DotProduct(TreadN, -StickDown) < WallStairNormalAlignMin)
+			{
+				continue;
+			}
+			// ② 必须"墙装"(踏面不朝世界 +Z)。水平楼梯(Level1/Level2/demo 那些)全部留给
+			//    旧系统 ⇒ 对它们零回归(旧路径的接管条件里也要求这两条)。
+			if (FVector::DotProduct(TreadN, FVector::UpVector) >= WallStairFloorMountUpDot)
+			{
+				continue;
+			}
+			const float D2 = FVector::DistSquared(Comp->Bounds.Origin, BallLoc);
+			if (D2 < BestDistSq)
+			{
+				BestDistSq = D2;
+				BestComp = Comp;
+				BestTreadN = TreadN;
+				BestAxis = Axis;
+			}
+		}
+	}
+
+	// 球正踩在**另一件楼梯**上(旧系统的地盘)时别抢。踩在普通墙/箱子/地面上**不拦** ——
+	// 那正是"贴墙接近楼梯"的正常情况(2026-10-08 修:v1 把这种也拦掉了,实测系统性死在 3 帧:
+	// 球从台阶倒角滑到墙上的那一帧起 can=0 → ExitGrace → 整套辅助消失)。
+	if (BestComp && bSupportHitValid)
+	{
+		const AActor* SupportActor = SupportHit.GetActor();
+		if (SupportActor && SupportActor != BestComp->GetOwner()
+			&& (MatchesStairTag(SupportActor, StairStickNameTag)
+				|| MatchesStairTag(SupportActor, StairStickBoostNameTag)))
+		{
+			BestComp = nullptr;
+		}
+	}
+	const bool bCandidate = (BestComp != nullptr);
+
+	// ---- 2) 目标件框架/探针/前方落差 ----
+	bool bSensed = false;
+	FHitResult SenseHit;
+	float AssistAccelUsed = 0.0f;
+	float AdhesionAccelUsed = 0.0f;
+	if (bCandidate)
+	{
+		if (WallStairComp.Get() != BestComp)
+		{
+			// 换件 = 状态全部重来(专家:绝不能跨楼梯件保留任何量)。
+			ResetWallStairState();
+			WallStairComp = BestComp;
+			WallStairState = 1; // Approach
+			WallStairStateEnterTime = NowSec;
+		}
+		WallStairTreadNormal = BestTreadN;
+		WallStairClimbAxis = BestAxis;
+		WallStairLastSeenTime = NowSec;
+
+		// 坡比用 mesh 局部尺寸 × 组件缩放(专家 Q2:别用 AheadRise/ProbeLen 估坡角 ——
+		// 那样 33/120 会把 43° 算成 15°~17°)。
+		if (const UStaticMeshComponent* SMC = Cast<UStaticMeshComponent>(BestComp))
+		{
+			if (const UStaticMesh* Mesh = SMC->GetStaticMesh())
+			{
+				const FBoxSphereBounds MeshB = Mesh->GetBounds();
+				const FVector S = BestComp->GetComponentTransform().GetScale3D();
+				WallStairRunCm = FMath::Abs(2.0f * MeshB.BoxExtent.Y * S.Y);
+				WallStairRiseCm = FMath::Abs(2.0f * MeshB.BoxExtent.Z * S.Z);
+				// 坡顶判据(专家 Round2 §14)的主项:局部进度。爬升 = -localY ⇒ 组件局部 -Y 端是坡顶。
+				// (5.8 的 FBoxSphereBounds 没有 .Min,用 Origin-BoxExtent 取局部分量)
+				// ⚠ 单位: 局部 Y 是**网格局部尺度**, 必须乘回组件缩放才是世界 cm —— 阈值
+				// (max(球半径, 比例×run)) 全是世界 cm。2026-10-08 实测踩过:不乘缩放 ⇒ 阈值等效
+				// 只有 24cm ⇒ 坡顶确认几乎永不触发, 全靠"探针丢失"保险退出(topLock 从不置位)。
+				const FVector LocalPos = BestComp->GetComponentTransform().InverseTransformPosition(BallLoc);
+				WallStairDistToTopCm = (LocalPos.Y - (MeshB.Origin.Y - MeshB.BoxExtent.Y)) * FMath::Abs(S.Y);
+				// 沿爬升轴的进度(cm):锁的迟滞(退回检测)与日志都用它。
+				WallStairProgressCm = FVector::DotProduct(BallLoc - BestComp->GetComponentLocation(), BestAxis);
+			}
+		}
+		const float SlopeRatio = (WallStairRunCm > 1.0f) ? (WallStairRiseCm / WallStairRunCm) : 1.0f;
+		WallStairClimbDir = (WallStairClimbAxis + WallStairTreadNormal * SlopeRatio).GetSafeNormal();
+
+		// 前向/邻域探针(专家 Q1):中心线 + 4 条偏移线沿 ±爬升轴;用 LineTraceComponent
+		// **只打这一件**(不会被别的墙体/箱子抢走首个命中)。
+		const FVector ThirdAxis = FVector::CrossProduct(BestAxis, BestTreadN).GetSafeNormal();
+		const FVector Offs[5] = {
+			FVector::ZeroVector,
+			BestTreadN * WallStairProbeRadiusCm,
+			BestTreadN * (-WallStairProbeRadiusCm),
+			ThirdAxis * WallStairProbeRadiusCm,
+			ThirdAxis * (-WallStairProbeRadiusCm) };
+		for (const FVector& Off : Offs)
+		{
+			const FVector From = BallLoc + Off;
+			for (int32 Sgn = 0; Sgn < 2; ++Sgn)
+			{
+				FHitResult H;
+				const FVector To = From + BestAxis * (Sgn == 0 ? WallStairProbeLenCm : -WallStairProbeLenCm);
+				if (BestComp->LineTraceComponent(H, From, To, Params))
+				{
+					if (!bSensed || H.Distance < SenseHit.Distance)
+					{
+						SenseHit = H;
+					}
+					bSensed = true;
+				}
+			}
+		}
+		if (bSensed)
+		{
+			WallStairLastHitTime = NowSec;
+			WallStairLastHitNormal = SenseHit.ImpactNormal.GetSafeNormal();
+		}
+		// 吸附方向:优先**真实接触法线**(43° 倒角上 -重力 有下坡分量,会把球往坡下推),
+		// 有 0.15s 记忆,再退回踏面法线。
+		if (bSensed && !SenseHit.ImpactNormal.IsNearlyZero())
+		{
+			WallStairSurfaceNormal = SenseHit.ImpactNormal.GetSafeNormal();
+		}
+		else if ((NowSec - WallStairLastHitTime) <= WallStairHitMemorySeconds && !WallStairLastHitNormal.IsNearlyZero())
+		{
+			WallStairSurfaceNormal = WallStairLastHitNormal;
+		}
+		else
+		{
+			WallStairSurfaceNormal = WallStairTreadNormal;
+		}
+
+		// 前方落差(只用于"坡顶"判定):当前支撑面深度 ↔ 前方 60cm 处、这件楼梯的表面深度。
+		const float HereDepth = bSupportHitValid
+			? FVector::DotProduct(SupportHit.Location - BallLoc, WallStairTreadNormal)
+			: -BallR;
+		const FVector AheadFrom = BallLoc + BestAxis * FMath::Min(60.0f, WallStairProbeLenCm * 0.5f);
+		FHitResult AheadH;
+		if (BestComp->LineTraceComponent(AheadH, AheadFrom, AheadFrom - WallStairTreadNormal * (BallR + 160.0f), Params))
+		{
+			const float AheadDepth = FVector::DotProduct(AheadH.Location - BallLoc, WallStairTreadNormal);
+			WallStairAheadRiseCm = AheadDepth - HereDepth; // 正 = 前方更高(还有台阶)
+		}
+		else
+		{
+			WallStairAheadRiseCm = -999.0f; // 前方没有这件楼梯的几何 = 坡顶/尽头
+		}
+	}
+
+	// ---- 3) 状态机(专家 Round3 §14:优先级 = 几何有效性 > 玩家明确输入 > 运动趋势)----
+	const FVector V = BallCollision->GetPhysicsLinearVelocity();
+	const bool bSupported = LandingResponse ? LandingResponse->IsSupported() : false;
+	const float AxisV = bCandidate ? FVector::DotProduct(V, WallStairClimbAxis) : 0.0f;
+	// 两个速度空间分开(专家 §8): servo 的目标 500 是沿 ClimbDir 的标量,
+	// AxisV 只是沿爬升轴的标量 —— 日志两个都打,避免以后拿错方向比较。
+	const float ClimbV = (bCandidate && !WallStairClimbDir.IsNearlyZero())
+		? FVector::DotProduct(V, WallStairClimbDir) : 0.0f;
+	const float InputAlong = (bCandidate && !LastDriveDesiredDir.IsNearlyZero())
+		? FVector::DotProduct(LastDriveDesiredDir, WallStairClimbAxis) : 0.0f;
+
+	// 坡顶判定(专家 Round2 §14): 主判据 = 局部进度接近上坡端; aheadRise 只是必要条件之二;
+	// 两者同时成立并连续确认若干帧才算到顶。
+	{
+		const bool bNearTop = bCandidate
+			&& (WallStairDistToTopCm <= FMath::Max(BallR, WallStairNearTopFraction * WallStairRunCm));
+		const bool bNoRiseAhead = bCandidate && (WallStairAheadRiseCm <= WallStairTopRiseCm);
+		WallStairTopFrames = (bNearTop && bNoRiseAhead) ? (WallStairTopFrames + 1) : 0;
+	}
+	const bool bAtTop = bCandidate && (WallStairTopFrames >= FMath::Max(WallStairTopConfirmFrames, 1));
+
+	// 探针连续丢失的**时间**累计(专家 §6: 按秒不按帧; 任一探针命中即清零)= 保险退出。
+	WallStairLostProbeTime = (bCandidate && !bSensed)
+		? (WallStairLostProbeTime + DeltaSeconds) : 0.0f;
+	const bool bLostGeometry = bCandidate && (WallStairLostProbeTime >= WallStairLostProbeSeconds);
+
+	// TopCompleted 锁的解除(专家 §4: 几何迟滞): 换件 / 退回一定距离 / 重力方向改变。
+	if (bWallStairTopLocked)
+	{
+		const bool bDifferentComp = bCandidate && WallStairCompletedComp.IsValid()
+			&& (WallStairComp.Get() != WallStairCompletedComp.Get());
+		const bool bRetreated = bCandidate
+			&& (WallStairProgressCm < WallStairTopProgressCm - WallStairTopRearmDistanceCm);
+		const bool bGravityChanged = !WallStairTopLockGravity.IsNearlyZero()
+			&& (FVector::DotProduct(StickDown, WallStairTopLockGravity) < 0.9f);
+		if (bDifferentComp || bRetreated || bGravityChanged)
+		{
+			bWallStairTopLocked = false;
+			WallStairCompletedComp = nullptr;
+			WallStairTopLockGravity = FVector::ZeroVector;
+		}
+	}
+
+	if (!bCandidate)
+	{
+		// 没有候选: 已在 ExitGrace 的按计时收尾; 其余(含 TopExit)进 ExitGrace, 超时彻底复位。
+		if (WallStairState == 4)
+		{
+			if ((NowSec - WallStairLastSeenTime) > WallStairExitGraceSeconds)
+			{
+				ResetWallStairState();
+				return false;
+			}
+		}
+		else if (WallStairState != 0)
+		{
+			if ((NowSec - WallStairLastSeenTime) <= WallStairExitGraceSeconds)
+			{
+				WallStairState = 4;
+				WallStairStateEnterTime = NowSec;
+			}
+			else
+			{
+				ResetWallStairState();
+				return false;
+			}
+		}
+	}
+	else
+	{
+		const bool bLockedForThis = bWallStairTopLocked && WallStairComp.IsValid()
+			&& (WallStairComp.Get() == WallStairCompletedComp.Get());
+		if (bAtTop)
+		{
+			// 几何完成: 最高优先级(压过玩家输入)—— 加锁 + TopExit(不再 Climb; 也不再当"沿墙加速器")。
+			if (!bWallStairTopLocked)
+			{
+				bWallStairTopLocked = true;
+				WallStairCompletedComp = WallStairComp;
+				WallStairTopProgressCm = WallStairProgressCm;
+				WallStairTopLockGravity = StickDown;
+			}
+			WallStairState = 5;
+				WallStairStateEnterTime = NowSec;
+		}
+		else if (bLostGeometry)
+		{
+			// 保险退出(专家 §6)。补充(2026-10-08 实测):探针在 topDist≈57cm 处就先丢失,
+			// 早于 topDist≤50 的"坡顶确认"门槛 ⇒ 主路径经常来不及置锁。按专家 §4 的意图,
+			// **离开几何且不是在往下滑** = 完成这件楼梯 → 在这里一并上锁。
+			if (!bWallStairTopLocked && AxisV > -WallStairGuardDownhillVelCm)
+			{
+				bWallStairTopLocked = true;
+				WallStairCompletedComp = WallStairComp;
+				WallStairTopProgressCm = WallStairProgressCm;
+				WallStairTopLockGravity = StickDown;
+			}
+			WallStairState = 5;
+			WallStairStateEnterTime = NowSec;
+		}
+		else if (bLockedForThis)
+		{
+			// 这件楼梯已完成: 按住上坡键也不能复活 Climb(专家 §4 的核心 bug 防护)。
+			WallStairState = 5;
+			WallStairStateEnterTime = NowSec;
+		}
+		else if (InputAlong > WallStairClimbInputDot)
+		{
+			// 明确上坡意图: 本帧直接 Climb(不做输入延迟, 专家 §11)。
+			if (WallStairState != 2)
+			{
+				WallStairState = 2;
+				WallStairStateEnterTime = NowSec;
+			}
+		}
+		else if (InputAlong < -WallStairClimbInputDot)
+		{
+			WallStairState = 3; // 明确下坡意图: Guard(受控下降)
+			WallStairStateEnterTime = NowSec;
+		}
+		else if (WallStairState == 2)
+		{
+			// Climb 保持(阈值迟滞): 意图消退(松开/转向) / 持续下滑 → 交回"在守"(驻停)。
+			if (InputAlong < WallStairClimbKeepDot || AxisV < -WallStairGuardDownhillVelCm)
+			{
+				WallStairState = 3;
+				WallStairStateEnterTime = NowSec;
+			}
+		}
+		else if (AxisV < -WallStairGuardDownhillVelCm)
+		{
+			WallStairState = 3;
+			WallStairStateEnterTime = NowSec;
+		}
+		else
+		{
+			WallStairState = 1; // Approach(有候选但意图不明确)
+		}
+	}
+	if (WallStairState == 0)
+	{
+		return false;
+	}
+	// ---- 4) 力 ----
+	// 专家 Round2 §10:把三个职责彻底分开 —— Climb servo 管前进, Guard servo 管驻停/受控下楼,
+	// adhesion 只管贴面。吸附方向**投影掉沿坡分量**,这样碰到 riser(surfN 突变)时不会
+	// 突然变成一个巨大的"上楼推动力"。
+	const FVector SurfN = WallStairSurfaceNormal.IsNearlyZero() ? WallStairTreadNormal : WallStairSurfaceNormal;
+	const auto ApplyWallStairAdhesion = [this](const FVector& InSurfN, float Accel)
+	{
+		if (Accel <= 0.0f || InSurfN.IsNearlyZero())
+		{
+			return;
+		}
+		FVector Dir = -InSurfN;
+		if (!WallStairClimbDir.IsNearlyZero())
+		{
+			Dir = FVector::VectorPlaneProject(Dir, WallStairClimbDir);
+		}
+		if (Dir.Normalize())
+		{
+			BallCollision->AddForce(Dir * Accel, NAME_None, true);
+		}
+	};
+
+	if (WallStairState == 2) // Climb
+	{
+		if (GravityBody)
+		{
+			// 爬时重力用楼梯档(1.667 → 1.0,保住弹跳/容错);与旧系统同一来源,不新加旋钮。
+			GravityBody->GravityScale = BallProfile ? BallProfile->StairGravityScale : 1.0f;
+		}
+		if (!WallStairClimbDir.IsNearlyZero())
+		{
+			const float Along = FVector::DotProduct(V, WallStairClimbDir);
+			const float Err = WallStairClimbTargetSpeedCm - Along;
+			AssistAccelUsed = FMath::Clamp(Err / FMath::Max(WallStairClimbResponseSeconds, 0.01f),
+				0.0f, WallStairClimbMaxAssistAccelCm);
+			if (AssistAccelUsed > 0.0f)
+			{
+				BallCollision->AddForce(WallStairClimbDir * AssistAccelUsed, NAME_None, true);
+			}
+		}
+		// 超速后的**正向输入渐弱**(专家 Round3 §10/§11):climbV ≥ FadeEnd 后不再让玩家的上坡输入
+		// 继续加速;FadeStart→FadeEnd 线性渐变(不用硬阈值)。驱动段读这三个字段执行。
+		bWallStairClimbActiveThisFrame = true;
+		WallStairClimbAxisDrive = WallStairClimbAxis;
+		{
+			const float FadeStart = WallStairClimbInputFadeStartCm;
+			const float FadeEnd = FMath::Max(WallStairClimbInputFadeEndCm, FadeStart + 1.0f);
+			WallStairClimbInputScale = FMath::GetMappedRangeValueClamped(
+				FVector2D(FadeStart, FadeEnd), FVector2D(1.0f, 0.0f), ClimbV);
+		}
+		AdhesionAccelUsed = bSupported ? WallStairAdhesionAccelCm : WallStairAdhesionAirborneAccelCm;
+		ApplyWallStairAdhesion(SurfN, AdhesionAccelUsed);
+	}
+	else if (WallStairState == 3 || WallStairState == 4) // Guard / ExitGrace
+	{
+		if (GravityBody)
+		{
+			GravityBody->GravityScale = BallProfile ? BallProfile->GravityScale : 1.0f;
+		}
+		// ① 切向伺服(专家 Round2 §5-§8):**重力前馈** + 速度反馈。
+		//    无输入 → 目标 0(真正能驻停); 明确下坡输入 → 目标 -DescentSpeed(受控下降)。
+		//    这就是"不该靠加大 adhesion 来止滑"的落点:adhesion 没有沿坡分量,止滑必须靠切向力。
+		//    ⚠ 切向必须取**当前接触面**上的上坡方向(专家 Round3: Guard 管"这个面"的驻停/下行)。
+		//    实测(2026-10-08): 用固定 43° ClimbDir 时, 球滑到平墙上后重力前馈仍按 43° 算
+		//    (那里沿坡分量其实是 0)⇒ 出现一个幻影 +Y 推力, 球自己往 +Y 漂。
+		FVector T = WallStairClimbDir; // 上坡切向(单位向量)
+		if (!SurfN.IsNearlyZero())
+		{
+			const FVector Proj = FVector::VectorPlaneProject(WallStairClimbAxis, SurfN.GetSafeNormal());
+			if (!Proj.IsNearlyZero())
+			{
+				T = Proj.GetSafeNormal();
+			}
+		}
+		if (!T.IsNearlyZero())
+		{
+			const float ManagerG = GravityManager ? GravityManager->GravityAccelerationCm : 1600.0f;
+			const float BodyScale = GravityBody ? GravityBody->GravityScale : 1.0f;
+			const float G = ManagerG * FMath::Max(BodyScale, 0.0f);
+			const float GravityComp = -FVector::DotProduct(StickDown * G, T); // 抵消重力沿坡分量
+			const bool bDownhillIntent = (InputAlong < -WallStairClimbInputDot);
+			const float TargetV = bDownhillIntent ? -WallStairGuardDescentSpeedCm : 0.0f;
+			const float Feedback =
+				(TargetV - FVector::DotProduct(V, T)) / FMath::Max(WallStairGuardResponseSeconds, 0.01f);
+			WallStairGuardAccelUsed = FMath::Clamp(GravityComp + Feedback,
+				-WallStairGuardMaxAccelCm, WallStairGuardMaxAccelCm);
+			BallCollision->AddForce(T * WallStairGuardAccelUsed, NAME_None, true);
+		}
+		// ② 硬安全上限(专家 §8:只是最后一道安全网,不是主控制器)。
+		if (WallStairGuardMaxSpeedCm > 0.0f)
+		{
+			const FVector Vel = BallCollision->GetPhysicsLinearVelocity();
+			const FVector Vertical = StickDown * FVector::DotProduct(Vel, StickDown);
+			const FVector Planar = Vel - Vertical;
+			const float PlanarSpeed = Planar.Size();
+			if (PlanarSpeed > WallStairGuardMaxSpeedCm)
+			{
+				BallCollision->SetPhysicsLinearVelocity(
+					Vertical + Planar * (WallStairGuardMaxSpeedCm / PlanarSpeed));
+			}
+		}
+		// 驱动段(本函数之后执行)读这三个:沿坡速度已达目标后,不再让下坡输入继续加速
+		// (受控下降的"档位感";无下坡意图时允许值 = 0)。
+		bWallStairGuardActiveThisFrame = true;
+		WallStairGuardDownhillDir = -T;
+		WallStairGuardAllowedDownSpeedCm = (InputAlong < -WallStairClimbInputDot)
+			? WallStairGuardDescentSpeedCm : 0.0f;
+		// ③ 软吸附(只管贴面;1000/1500 不动 —— 专家 §9)。
+		AdhesionAccelUsed = bSupported ? WallStairAdhesionAccelCm : WallStairAdhesionAirborneAccelCm;
+		ApplyWallStairAdhesion(SurfN, AdhesionAccelUsed);
+	}
+	else if (WallStairState == 5) // TopExit: 楼梯机制结束(专家 Round3 §3)
+	{
+		// 只把重力换回普通档 —— **不给任何楼梯力**:不清速度、不加吸附、不用 43° 推,
+		// 普通玩家移动当场重新接管(保留球出坡顶时的沿墙速度/角速度/惯性)。
+		if (GravityBody)
+		{
+			GravityBody->GravityScale = BallProfile ? BallProfile->GravityScale : 1.0f;
+		}
+	}
+
+	// ---- 5) 验收日志(专家 Q6 的字段表;逐帧可判定"到底哪一步没成立")----
+	if (bStairDebugLog)
+	{
+		static const TCHAR* StateNames[6] = {
+			TEXT("None"), TEXT("Approach"), TEXT("Climb"), TEXT("Guard"), TEXT("ExitGrace"), TEXT("TopExit") };
+		const AActor* CompOwner = bCandidate ? BestComp->GetOwner()
+			: (WallStairComp.IsValid() ? WallStairComp->GetOwner() : nullptr);
+		const FVector Axis = bCandidate ? BestAxis : WallStairClimbAxis;
+		const FVector TreadN = bCandidate ? BestTreadN : WallStairTreadNormal;
+		const float SlopeDeg = FMath::RadiansToDegrees(
+			FMath::Atan2(WallStairRiseCm, FMath::Max(WallStairRunCm, 1.0f)));
+		const float Progress = (bCandidate && !Axis.IsNearlyZero())
+			? FVector::DotProduct(BallLoc - BestComp->GetComponentLocation(), Axis) : 0.0f;
+		const float GuardTargetV = (WallStairState == 3 || WallStairState == 4)
+			? ((InputAlong < -WallStairClimbInputDot) ? -WallStairGuardDescentSpeedCm : 0.0f) : 0.0f;
+		UE_LOG(LogTemp, Log, TEXT("[GSStair2] t=%.3f sense=%s state=%s actor=%s pos=(%.0f,%.0f,%.0f) g=(%.2f,%.2f,%.2f) treadN=(%.2f,%.2f,%.2f) axis=(%.2f,%.2f,%.2f) surfN=(%.2f,%.2f,%.2f) progress=%.0f topDist=%.0f topF=%d topLock=%d lost=%.2f aheadRise=%.0f rise=%.0f run=%.0f slopeDeg=%.0f in=%.2f axisV=%.0f climbV=%.0f target=%.0f inScale=%.2f assist=%.0f guardA=%.0f guardTgt=%.0f adh=%.0f cap=%.0f sup=%d can=%d"),
+			NowSec,
+			bSensed ? TEXT("Forward") : TEXT("Nearby"),
+			StateNames[FMath::Clamp(WallStairState, 0, 5)],
+			CompOwner ? *CompOwner->GetActorNameOrLabel() : TEXT("none"),
+			BallLoc.X, BallLoc.Y, BallLoc.Z,
+			StickDown.X, StickDown.Y, StickDown.Z,
+			TreadN.X, TreadN.Y, TreadN.Z,
+			Axis.X, Axis.Y, Axis.Z,
+			SurfN.X, SurfN.Y, SurfN.Z,
+			Progress, WallStairDistToTopCm, WallStairTopFrames,
+			bWallStairTopLocked ? 1 : 0, WallStairLostProbeTime,
+			WallStairAheadRiseCm, WallStairRiseCm, WallStairRunCm, SlopeDeg,
+			InputAlong, AxisV, ClimbV, WallStairClimbTargetSpeedCm, WallStairClimbInputScale,
+			AssistAccelUsed,
+			WallStairGuardAccelUsed, GuardTargetV,
+			AdhesionAccelUsed, WallStairGuardMaxSpeedCm,
+			bSupported ? 1 : 0, bCandidate ? 1 : 0);
+	}
+	return true;
+}
+
 void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 {
 	if (!BallCollision || !BallCollision->IsSimulatingPhysics())
@@ -1587,23 +2141,43 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 				}
 				bClimbAhead = StairVzTrendCm >= StairTrendAscendCm;
 
-				// 探针降级为**纯测量**:只为爬坡助力提供前方落差(定目标速度与坡角)。
-				// 量有噪声无所谓——它只决定一个力的大小,不参与开关。测不到就按 0。
-				StairAheadRiseMeasuredCm = 0.0f;
-				if (GetWorld() && !StairTravelDir.IsNearlyZero())
+				// ===== 2026-10-07(墙上楼梯)=====
+				// 问题:重力垂直于台阶面时(球在墙上爬楼梯),-dot(v,重力) ≈ 0 ⇒ 上面的趋势门**永远开不了**,
+				// 助力一次都不会开(用户"起步就上不去")。补一个**与重力轴无关的几何判据**:
+				//   沿台阶面方向探"前方落差",平滑后为正 = 正朝台阶更高的一侧走 = 在爬。
+				// 起步(沿面速度很小)时朝 ± 两个沿面方向各探一次,把 StairTravelDir 指向落差更大的那一侧
+				// —— 球停在楼梯上也能判出"哪边是上",第一下就有力。
 				{
-					const FVector AheadFrom = StickFrom + StairTravelDir * StairAheadProbeCm;
-					FHitResult AheadHit;
-					if (GetWorld()->LineTraceSingleByChannel(AheadHit, AheadFrom,
-						AheadFrom + StickDown * (BallR + StairAheadProbeDepthCm), ECC_Visibility, StickParams))
+					const float InPlaneSpeed = HorizVel.Size();
+					auto ProbeStairRise = [&](const FVector& Dir) -> float
 					{
-						StairAheadRiseMeasuredCm =
-							FVector::DotProduct(AheadHit.Location - StickHit.Location, -StickDown);
+						FHitResult AheadHit;
+						const FVector From = StickFrom + Dir * StairAheadProbeCm;
+						if (GetWorld() && GetWorld()->LineTraceSingleByChannel(AheadHit, From,
+							From + StickDown * (BallR + StairAheadProbeDepthCm), ECC_Visibility, StickParams))
+						{
+							return FVector::DotProduct(AheadHit.Location - StickHit.Location, -StickDown);
+						}
+						return 0.0f;
+					};
+					StairAheadRiseMeasuredCm = StairTravelDir.IsNearlyZero() ? 0.0f : ProbeStairRise(StairTravelDir);
+					if (InPlaneSpeed < 120.0f && !StairTravelDir.IsNearlyZero())
+					{
+						const float RiseBackCm = ProbeStairRise(-StairTravelDir);
+						if (RiseBackCm > StairAheadRiseMeasuredCm + 1.0f)
+						{
+							StairTravelDir = -StairTravelDir;
+							StairAheadRiseMeasuredCm = RiseBackCm;
+						}
 					}
+				// 2026-10-08(专家 Q3):原来是函数级 static —— 离开楼梯不复位、跨件/跨 PIE 残留,
+				// 重新贴上下坡楼梯时会误开"在爬"数帧(实测 run2 t=9.705: trend=-2 却 climb=1,
+				// 防飞全关、球以 1650cm/s 冲下楼梯)。改为成员(见 .h),并在换件/复位处清零。
+					StairRiseTrendCm = FMath::Lerp(StairRiseTrendCm, StairAheadRiseMeasuredCm, TrendAlpha);
+					bClimbAhead = bClimbAhead || (StairRiseTrendCm >= 3.0f);
 				}
 			}
 
-			// "在守"才为 1。"在爬"时整条防飞链全关 —— 这是两个相反要求能共存的关键。
 			const float ProtectGate = bClimbAhead ? 0.0f : 1.0f;
 
 			// "在守"时限速,**贴地和腾空都要限**。台阶不连续,不限速必跳步;而"飞出去"
@@ -1639,7 +2213,18 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 				GravityBody->GravityScale = (bOnStairs && bClimbAhead) ? StairScale : ProfileScale;
 			}
 
-			if (bOnStairs)
+			// ===== 2026-10-08 墙装楼梯专项(专家方案,证据见 STAIR_WALL_PACKAGE.zip)=====
+			// 旧系统只在"球脚下(沿重力)就是楼梯件"时工作;墙上球脚下是墙/箱子,楼梯件在**前方**
+			// ⇒ 该段楼梯旧系统一条日志都不出(run2 实测)。这里新增一条**独立通道**:邻域感知 →
+			// mesh 局部系(踏面法线/爬升轴/真实坡比)→ 真坡向速度伺服 + 真法线软吸附。
+			// 只在"墙装楼梯 且 当前重力下可骑"时接管;水平地面楼梯一律留给旧路径(逐帧不变)。
+			bool bWallStairActive = false;
+			if (bWallStairEnabled && BallCollision)
+			{
+				bWallStairActive = UpdateWallStairAssist(DeltaSeconds, StickDown, StickHit, StickHit.bBlockingHit);
+			}
+
+			if (bOnStairs && !bWallStairActive)
 			{
 				// 记下"确实踩在楼梯上"的位置与时刻:离开后的一小块靠它继续吸。
 				LastStairContactLocation = StickFrom;
@@ -1743,7 +2328,7 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 					}
 				}
 			}
-			else if (bHasStairContact)
+			else if (bHasStairContact && !bWallStairActive)
 			{
 				// 端点延续吸附(2026-09-15 用户需求):上下端点往外一小块仍给吸附,防止从最后
 				// 一级台阶飞出去。强度/范围按"上次踩的是不是点名楼梯"取强化值或基础值。
@@ -1792,6 +2377,10 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 					bClimbAhead = false;
 					StairAheadRiseMeasuredCm = 0.0f;
 					StairTravelDir = FVector::ZeroVector;
+					// 2026-10-08(专家 Q3):趋势量也一起清 —— 离开楼梯必须复位,否则重新贴上
+					// 下坡楼梯时会误开"在爬"(防飞/限速短暂全关,见 .h 成员注释)。
+					StairRiseTrendCm = 0.0f;
+					StairVzTrendCm = 0.0f;
 				}
 			}
 		}
@@ -1799,6 +2388,8 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 
 	if (MoveInput.IsNearlyZero())
 	{
+		// 松手 = 没有"玩家意图"了:墙楼梯状态机别拿旧方向当输入(否则会误判"想上楼")。
+		LastDriveDesiredDir = FVector::ZeroVector;
 		// No input: counter-torque brake so the ball stops quickly instead of
 		// coasting on rolling friction (supported only; air keeps momentum).
 		// 纯反力矩受低摩擦牵引限制(球会空转而线速度停不下来),叠加平面速度
@@ -1938,6 +2529,39 @@ void AGSRollingBallPawn::ApplyMovement(float DeltaSeconds)
 	{
 		return;
 	}
+
+	// 记录本帧的输入方向:墙装楼梯状态机在**下一帧**用它做"玩家意图"判定(原始方向, 不做平滑;
+	// 状态机在 ApplyMovement 里运行在本段之前, 所以只能拿到上一帧的方向 —— 16ms 滞后可接受)。
+	LastDriveDesiredDir = Desired;
+
+	// 墙楼梯"在守":沿坡速度已经达到伺服目标(无输入=0 / 下坡意图=DescentSpeed)后,不再让
+	// 下坡方向的输入继续加速 —— "驻停/受控下降"的档位感由此而来(硬上限 450 只是兜底)。
+	if (bWallStairGuardActiveThisFrame && !WallStairGuardDownhillDir.IsNearlyZero())
+	{
+		const float DownSpeed = FVector::DotProduct(BallCollision->GetPhysicsLinearVelocity(), WallStairGuardDownhillDir);
+		const float DownInput = FVector::DotProduct(Desired, WallStairGuardDownhillDir);
+		if (DownSpeed >= WallStairGuardAllowedDownSpeedCm && DownInput > 0.0f)
+		{
+			Desired -= WallStairGuardDownhillDir * DownInput;
+		}
+	}
+	// 墙楼梯 Climb:超速后按渐弱系数削掉一部分**上坡输入**(专家 Round3 §10: 不用硬阈值,
+	// 也不硬 SetVelocity;与 Guard 的抑制方式对称)。
+	if (bWallStairClimbActiveThisFrame && WallStairClimbInputScale < 1.0f
+		&& !WallStairClimbAxisDrive.IsNearlyZero())
+	{
+		const float UpInput = FVector::DotProduct(Desired, WallStairClimbAxisDrive);
+		if (UpInput > 0.0f)
+		{
+			Desired -= WallStairClimbAxisDrive * (UpInput * (1.0f - WallStairClimbInputScale));
+		}
+	}
+	// 本帧用完即清(消费语义):这两个标记只描述"本次 ApplyMovement 里墙楼梯状态机刚下过的指令",
+	// 下一帧由状态机重新置位 —— 避免状态机某帧没跑时残留旧指令。
+	bWallStairGuardActiveThisFrame = false;
+	WallStairGuardDownhillDir = FVector::ZeroVector;
+	bWallStairClimbActiveThisFrame = false;
+	WallStairClimbInputScale = 1.0f;
 
 	const bool bSupported = LandingResponse ? LandingResponse->IsSupported() : false;
 

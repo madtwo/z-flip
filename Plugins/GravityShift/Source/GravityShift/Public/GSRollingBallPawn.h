@@ -25,6 +25,8 @@ class USceneComponent;
 class USphereComponent;
 class USpringArmComponent;
 class UStaticMeshComponent;
+class UPrimitiveComponent;
+class UStaticMesh;
 
 UCLASS(Blueprintable, BlueprintType, meta = (DisplayName = "GS Rolling Ball Pawn"))
 class GRAVITYSHIFT_API AGSRollingBallPawn : public APawn
@@ -295,14 +297,17 @@ public:
 	//   · 且**只在下坡趋势时**吃两道削速度硬约束(防飞);
 	// 没命中的楼梯一切照基础值走,且**永不削速度**——爬坡要靠"向上的速度"爬上台阶,
 	// 削了就直接爬不动(用户实测"其他楼梯都上坡上不了了")。
+	// 2026-10-07: 追加 SM_Walls_Stairs_1(美术馆那段楼梯,标签不含 Linear ⇒ 只吃 1500 基础助力,实测爬不上);
+	// 再放宽为整类 SM_Walls_Stairs*(美术楼梯全部吃强化档: 爬梯力 4200/3000 + 顶部延续 1400/280cm/0.8s),
+	// 依旧只作用于"点名楼梯", 平地与其它非楼梯表面不受影响。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement")
-	FString StairStickBoostNameTag = TEXT("Linear3,Linear4,Linear5,Linear6");
+	FString StairStickBoostNameTag = TEXT("Linear3,Linear4,Linear5,Linear6,SM_Walls_Stairs");
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
-	float StairStickBoostAccelCm = 3200.0f;
+	float StairStickBoostAccelCm = 4200.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
-	float StairStickBoostAirborneAccelCm = 2200.0f;
+	float StairStickBoostAirborneAccelCm = 3000.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
 	float StairStickBoostEndAccelCm = 1400.0f;
@@ -375,9 +380,12 @@ public:
 	bool bStairAssistEnabled = true;
 
 	// 沿重力反方向的垂直速度趋势(cm/s)高过这个值才算"在爬"。45° 坡上 370cm/s 时该值约 260,
-	// 平地滚动时在 0 附近摆 —— 40 两边都留足了余量。
+	// 平地滚动时在 0 附近摆。
+	// 2026-10-07: 40 → 0(用户"起步就上不去": 40 要求球**已经在往上冲**才开助力,慢速/静止起步
+	// 永远够不到 ⇒ 助力只能锦上添花、不能推上路。本块只在"脚探针命中楼梯"时执行,平地的 0 附近
+	// 摆动不影响任何东西;下坡趋势转负仍然归"在守"(防飞),所以防飞语义不变。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement")
-	float StairTrendAscendCm = 40.0f;
+	float StairTrendAscendCm = 0.0f;
 
 	// ---- 前探针:**只用来量落差**,不参与判定(判定见上),所以抖动无害 ----
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0"))
@@ -413,6 +421,137 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Movement", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StairStickLiftKill = 1.0f;
+
+	// ================= 墙装楼梯专项(2026-10-08;专家方案 Q1/Q2/Q3)=================
+	// 背景:主图那段墙装楼梯(SM_Walls_Stairs_10/11/12,踏面法线朝世界 ±X,该段重力 -X)上,
+	// 旧系统一条日志都不出 —— 它的识别是"球心沿重力向下的单探针",而墙上球脚下是墙/箱子,
+	// 楼梯件在球**前方**(立面 + 43° 倒角),探针永远照不到(证据见 STAIR_WALL_PACKAGE.zip)。
+	// 本块是**新增的独立通道**,只在"该件是墙装楼梯(SM_Walls_Stairs_* 网格 且 踏面不朝世界+Z)
+	// 且当前重力下可骑(踏面法线 ≈ -重力)"时接管;所有水平地面楼梯(demo/Level1/Level2)一律
+	// 不碰 —— 旧路径对它们逐帧不变。
+	// 接管后的力模型(专家 Q2):用 mesh 局部系建稳定爬升坐标系(localZ=踏面法线、-localY=爬升轴、
+	// 坡比=|Z尺寸·scaleZ| / |Y尺寸·scaleY|),沿真实坡向做**目标速度伺服**,沿**真实接触法线**
+	// 软吸附(不能用 -重力:在 43° 倒角上 -重力有下坡分量),"在守"限速单独一档(专家 Q4)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair")
+	bool bWallStairEnabled = true;
+
+	// 识别用的网格名片段(子串,匹配 StaticMesh 资产路径而非 Actor Label —— 美术改名不失效)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair")
+	FString WallStairMeshTag = TEXT("SM_Walls_Stairs_");
+
+	// 邻域搜索半径(cm):以球心为球心 overlap,找墙装楼梯件(专家 Q1 的 Forward/Nearby 通道)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "50.0"))
+	float WallStairSenseRadiusCm = 220.0f;
+
+	// 沿爬升轴 ± 的探针长度与偏移半径(cm)。偏移半径不用整球半径(防 initial overlap)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "20.0"))
+	float WallStairProbeLenCm = 150.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "5.0"))
+	float WallStairProbeRadiusCm = 25.0f;
+
+	// 可骑门:踏面法线与 -重力 的余弦下限(专家 Q1 的 reject 条件)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float WallStairNormalAlignMin = 0.75f;
+
+	// 水平安装门:踏面法线与世界 +Z 的余弦 ≥ 该值 = 地面楼梯,交给旧系统(零回归保证)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float WallStairFloorMountUpDot = 0.75f;
+
+	// 爬升伺服(专家 Q2):沿真实坡向把速度顶到该值,误差/响应时间 = 加速度,封顶 MaxAssist。
+	// 500cm/s 穿过约 54.5cm 的 43° 面只需 ~0.11s。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "50.0"))
+	float WallStairClimbTargetSpeedCm = 500.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0"))
+	float WallStairClimbMaxAssistAccelCm = 3400.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.01"))
+	float WallStairClimbResponseSeconds = 0.12f;
+
+	// 软吸附:沿**真实接触法线**加压(接触 1000 / 短暂离面 1500)。别用 StickDown*4200。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0"))
+	float WallStairAdhesionAccelCm = 1000.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0"))
+	float WallStairAdhesionAirborneAccelCm = 1500.0f;
+
+	// 墙楼梯"在守"限速(cm/s,hard safety cap;地面楼梯的 900/700 不动)。专家 Round2 §7/§8:
+	// 450 只当最后一道安全网,主要控制器是下面的 Guard 切向伺服。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0"))
+	float WallStairGuardMaxSpeedCm = 450.0f;
+
+	// ---- Guard 切向伺服(专家 Round2 §5-§8:把"贴面"和"沿坡速度"两个职责彻底分开)----
+	// 吸附只管压回接触面(法向);沿坡速度由独立伺服管:
+	//   加速度 = 抵消重力沿坡分量(-dot(g·gravityScale, T)) + (目标速度 - 当前沿坡速度)/τ
+	// 无输入 → 目标 0(驻停);明确下坡输入 → 目标 -DescentSpeed(受控下降)。
+	// 实测依据:43° 坡上重力沿坡 ≈1810cm/s²,241cm/s 要在 ~0.12s 停住需要 ≈2000 反馈 ⇒ 合计 ~3800,
+	// 所以 MaxAccel 从 4200 起测。**这不是把 adhesion 从 1000 调大**(专家 §9)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0"))
+	float WallStairGuardMaxAccelCm = 4200.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.01"))
+	float WallStairGuardResponseSeconds = 0.12f;
+
+	// 明确按下坡时的受控下降速度(cm/s,沿坡向下目标)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0"))
+	float WallStairGuardDescentSpeedCm = 300.0f;
+
+	// 沿爬升轴的负速度超过该值(cm/s)= 在往下滑 → 立刻进"在守"(原始量,不等平滑)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0"))
+	float WallStairGuardDownhillVelCm = 80.0f;
+
+	// 探针最后一次命中该件后,接触法线/吸附方向继续有效的时间(s)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0"))
+	float WallStairHitMemorySeconds = 0.15f;
+
+	// "玩家意图"阈值:输入方向与爬升轴的余弦 > 该值 = 想上楼; < -该值 = 想下楼。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float WallStairClimbInputDot = 0.2f;
+
+	// Climb 保持阈值(专家 Round2 §12 阈值迟滞):进入用 InputDot,保持只要 > 该值;
+	// 低于该值(输入转向/松开)就交回"在守"(驻停),而不是继续推。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float WallStairClimbKeepDot = 0.05f;
+
+	// 状态切换的去抖时长(仅保留给"非输入类"切换;专家 §11:明确输入不做延迟,本帧生效)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0"))
+	float WallStairStateDwellSeconds = 0.05f;
+
+	// 目标丢失后的延续(ExitGrace,继承"在守"):走出楼梯/坡顶后一小段仍限速防飞,再复位。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0"))
+	float WallStairExitGraceSeconds = 0.3f;
+
+	// 前方落差 ≤ 该值(cm)视为"前方无台阶"(坡顶判据的必要条件之一)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair")
+	float WallStairTopRiseCm = 5.0f;
+
+	// 坡顶判定(专家 Round2 §14:单点探针太容易误报):主判据 = 局部进度接近上坡端
+	// (距坡顶 ≤ max(球半径, 该比例×轴向长度)),再叠加"前方无落差",并要求连续帧数确认。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float WallStairNearTopFraction = 0.12f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "1"))
+	int32 WallStairTopConfirmFrames = 3;
+
+	// ---- Round3 裁定(专家 §1/§4/§6/§10-§12)----
+	// 探针连续丢失的**时间**累计(s,不按帧): 所有前向探针都脱靶这么久 = 异常/离开几何
+	// → TopExit(保险退出)。任一探针命中即清零。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0"))
+	float WallStairLostProbeSeconds = 0.06f;
+
+	// TopCompleted 锁的解除迟滞(cm): 坡顶完成加锁后,只有球**退回**楼梯内部这么多(cm,按爬升轴
+	// 进度算)才允许再次爬同一件;防止按住上坡键时"越顶 → 下一帧又 Climb"。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0"))
+	float WallStairTopRearmDistanceCm = 60.0f;
+
+	// Climb 超速后的**正向输入渐弱**(专家 §10/§11): climbV ≥ FadeEnd 时不再让玩家的上坡输入
+	// 继续加速;FadeStart→FadeEnd 线性渐变(不是硬阈值)。服务端仍按 TargetSpeed 伺服。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0"))
+	float WallStairClimbInputFadeStartCm = 450.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0"))
+	float WallStairClimbInputFadeEndCm = 520.0f;
 
 	// ================= 贴附/粘性(2026-10-07 用户需求)=================
 	// "小球在平地以及墙上的时候,要与地面或者墙体有粘性,也就是不能平地飞起来。"
@@ -788,6 +927,54 @@ public:
 	float StairAheadRiseMeasuredCm = 0.0f;
 	// 水平行进方向(球速在垂直于重力的平面上的投影),太慢时沿用上次。
 	FVector StairTravelDir = FVector::ZeroVector;
+	// 几何爬升探针的平滑值(2026-10-08:由函数级 static 改为成员 —— 专家 Q3"绝不能跨楼梯件
+	// 保留";离开楼梯/换件/复位处必须清零,否则重新贴上下坡楼梯时会误开"在爬")。
+	float StairRiseTrendCm = 0.0f;
+
+	// ---- 墙装楼梯专项状态(2026-10-08, 瞬时非反射) ----
+	// WallStairState: 0=None 1=Approach 2=Climb 3=Guard 4=ExitGrace 5=TopExit(已完成/异常退出,
+	// 不再施任何楼梯力, 普通移动接管 —— 专家 Round3 §3).
+	int32 WallStairState = 0;
+	TWeakObjectPtr<UPrimitiveComponent> WallStairComp;
+	FVector WallStairTreadNormal = FVector::ZeroVector;
+	FVector WallStairClimbAxis = FVector::ZeroVector;
+	FVector WallStairClimbDir = FVector::ZeroVector;
+	FVector WallStairSurfaceNormal = FVector::ZeroVector;
+	FVector WallStairLastHitNormal = FVector::ZeroVector;
+	float WallStairRiseCm = 0.0f;
+	float WallStairRunCm = 0.0f;
+	float WallStairAheadRiseCm = 0.0f;
+	// 局部进度:距"上坡端"(组件局部 -Y 端)的距离(cm) + 沿爬升轴的进度(cm,用于锁的迟滞)。
+	float WallStairDistToTopCm = 0.0f;
+	float WallStairProgressCm = 0.0f;
+	int32 WallStairTopFrames = 0;
+	// 探针连续丢失的时间累计(s) —— 保险退出(专家 §6)。
+	float WallStairLostProbeTime = 0.0f;
+	// ---- TopCompleted 锁(专家 §4)----
+	// 坡顶确认后锁住"这件楼梯已完成";按住上坡键也不能马上重新 Climb。解除条件:
+	// 退回 WallStairTopRearmDistanceCm 以上 / 换件 / 重力方向改变(见 UpdateWallStairAssist)。
+	TWeakObjectPtr<UPrimitiveComponent> WallStairCompletedComp;
+	bool bWallStairTopLocked = false;
+	float WallStairTopProgressCm = 0.0f;
+	FVector WallStairTopLockGravity = FVector::ZeroVector;
+	float WallStairLastSeenTime = -1000.0f;
+	float WallStairLastHitTime = -1000.0f;
+	float WallStairStateEnterTime = -1000.0f;
+	float WallStairDwellStart = -1000.0f;
+	// "在守"限速/伺服本帧生效 + 下坡方向 + 允许的下坡速度(驱动段据此抑制超速的下坡输入)。
+	bool bWallStairGuardActiveThisFrame = false;
+	FVector WallStairGuardDownhillDir = FVector::ZeroVector;
+	float WallStairGuardAllowedDownSpeedCm = 0.0f;
+	// 本帧 Guard 实际用的切向加速度(仅日志)。
+	float WallStairGuardAccelUsed = 0.0f;
+	// Climb 本帧是否生效 + 上坡输入渐弱系数(驱动段据此削正向输入;专家 §10)。
+	bool bWallStairClimbActiveThisFrame = false;
+	FVector WallStairClimbAxisDrive = FVector::ZeroVector;
+	float WallStairClimbInputScale = 1.0f;
+	// 上一帧的输入方向(驱动段写入;状态机的"玩家意图"判据,原始量,滞后 1 帧可接受)。
+	FVector LastDriveDesiredDir = FVector::ZeroVector;
+	// 网格资产 → "是否属于墙楼梯家族"的缓存(避免每帧对每个 overlap 结果做字符串匹配)。
+	TMap<TWeakObjectPtr<UStaticMesh>, bool> WallStairMeshTagCache;
 
 	// ---- 楼梯端点延续吸附状态(瞬时,非反射) ----
 	// 最后一次"确实踩在楼梯上"的球位置与时刻;离开楼梯后的一小块里靠它判断还在端点区。
@@ -831,6 +1018,14 @@ public:
 
 	// 名字/标签 或 类名 是否含 TagsCsv(逗号分隔)里任一片段:用于楼梯的"点名强化"判定。
 	bool MatchesStairTag(const AActor* Actor, const FString& TagsCsv) const;
+
+	// ---- 墙装楼梯专项(2026-10-08) ----
+	// 邻域感知 + 局部系状态机 + 速度伺服/软吸附;返回 true = 本帧由它接管(调用方据此跳过旧楼梯力)。
+	bool UpdateWallStairAssist(float DeltaSeconds, const FVector& StickDown, const FHitResult& SupportHit, bool bSupportHitValid);
+	// 该组件是否属于"墙装楼梯"网格家族(按 StaticMesh 资产路径子串判定,不依赖 Actor Label)。
+	bool IsWallStairComponent(const UPrimitiveComponent* Comp);
+	// 全部墙楼梯状态复位(换件/走远/超时;连旧趋势量一起清,见 .h 成员注释)。
+	void ResetWallStairState();
 
 	UFUNCTION(BlueprintPure, Category = "GravityShift")
 	FString GetAxisHintText() const;
