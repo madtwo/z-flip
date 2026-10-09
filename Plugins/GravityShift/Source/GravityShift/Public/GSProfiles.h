@@ -7,6 +7,7 @@
 #include "GravityShiftTypes.h"
 #include "GSProfiles.generated.h"
 
+class UGeometryCollection;
 class UStaticMesh;
 
 UCLASS(BlueprintType, meta = (DisplayName = "GS Gravity Profile"))
@@ -206,6 +207,11 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	TObjectPtr<UStaticMesh> BrokenMesh = nullptr;
+
+	/** 碎裂资产。留空则按 /Game/GravityShift/Fracture/<网格名>_GC 自动找。
+	 *  没找到就退回老行为(隐藏 + 换 BrokenMesh)。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Fracture")
+	TObjectPtr<UGeometryCollection> FractureCollection = nullptr;
 };
 
 UCLASS(BlueprintType, meta = (DisplayName = "GS Block Profile"))

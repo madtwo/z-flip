@@ -3357,6 +3357,15 @@ void AGSRollingBallPawn::ResetToCheckpoint()
 	{
 		LandingResponse->ResetFlightState();
 	}
+
+	// 世界跟着一起回档:碎掉的方块 Repair、拾取物/门复位、网格重吸附。
+	// 这条路以前只复位小球,而唯一会复原世界的 AGSKillVolume 正式关卡一个都没摆,
+	// 所以按 R 之后场景一直是破的。ResetWorld 只在有存档点时才传送玩家,
+	// 没存档点时上面那句 RestoreInitialState 仍是位置的唯一来源。
+	if (WorldStateManager)
+	{
+		WorldStateManager->ResetWorld();
+	}
 }
 
 FVector AGSRollingBallPawn::GetBallLinearVelocity() const
