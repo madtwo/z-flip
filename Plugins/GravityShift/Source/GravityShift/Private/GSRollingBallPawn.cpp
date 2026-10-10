@@ -341,7 +341,9 @@ void AGSRollingBallPawn::BeginGravityRedirect(FVector TargetGravityDirection, fl
 	// 骑行 watchdog 与"真实位移"基准复位(新一次骑行从零开始)
 	RedirectStallWindowSeconds = 0.0f;
 	RedirectStallProgressCm = 0.0f;
+	RedirectDeadWindows = 0;
 	bHasRedirectPrevLoc = false;
+	bGravityRedirectCarry = false;
 
 	if (GravityBody)
 	{
@@ -401,6 +403,7 @@ void AGSRollingBallPawn::AbortGravityRedirect()
 	bGravityRedirectActive = false;
 	RedirectStallWindowSeconds = 0.0f;
 	RedirectStallProgressCm = 0.0f;
+	RedirectDeadWindows = 0;
 	bHasRedirectPrevLoc = false;
 }
 
@@ -567,6 +570,16 @@ void AGSRollingBallPawn::UpdateGravityRedirect(float DeltaSeconds)
 		}
 		BallCollision->AddForce(ServoAccel, NAME_None, true);   // bAccelChange=true:与质量无关
 
+		// ★挤死兜底(2026-10-10):见 bGravityRedirectCarry 的声明。带球沿**当前切向**走,
+		//   Forward = cross(当前上, 弯道轴) 随重力一起转 ⇒ 逐帧累积出来的正是理想弧。
+		if (bGravityRedirectCarry)
+		{
+			BallCollision->SetWorldLocation(
+				BallCollision->GetComponentLocation() + Forward * (GravityRedirectSpeed * Dt),
+				false, nullptr, ETeleportType::None);
+			BallCollision->SetPhysicsLinearVelocity(Forward * GravityRedirectSpeed);
+		}
+
 		// 进度用**真实位置增量**沿前进方向的投影累计(专家指出 ActualVelocity.Size()*Dt 只是速度积分,
 		// 骑行每帧把速度写成 500,这一项恒为正,和"实际走没走"完全脱钩)。
 		const FVector RideLoc = BallCollision->GetComponentLocation();
@@ -633,7 +646,34 @@ void AGSRollingBallPawn::UpdateGravityRedirect(float DeltaSeconds)
 					return;
 				}
 				// 只是慢(没被埋):保持骑行继续推,不中止。
-				UE_LOG(LogTemp, Warning, TEXT("[GSRedirect] 爬得慢(0.3s %.1fcm)但没被埋 → 继续骑行"), WindowProgressCm);
+				// 2026-10-10 实测:件尺寸≈球直径(Level3 的 100cm 件)时球会在触发盒里**完全静止**
+				// 3~5s(位置逐帧一模一样),只有 GravityRedirectMaxSeconds 的硬超时能放它走 —— 玩家
+				// 白等,体感就是"过转向器卡一下"。慢爬 ≠ 停死:连续 2 窗(0.6s)≈0 进度就转成带球模式
+				// (见 bGravityRedirectCarry),把球沿理想弧送出去,不再干等超时。
+				if (WindowProgressCm < 1.0f)
+				{
+					++RedirectDeadWindows;
+					// 两窗完全没动、埋深又是 0 ⇒ 是"件太小挤住",不是慢爬。别再等:从下一帧起
+					// 沿切向自己带球,把它送出弯道。
+					if (RedirectDeadWindows >= 2 && !bGravityRedirectCarry)
+					{
+						bGravityRedirectCarry = true;
+						UE_LOG(LogTemp, Warning, TEXT("[GSRedirect] 两窗 0 进度(埋深 %.1f)⇒ 球被件挤住过不去,转为沿切向带球走完弯道"), EmbedCm);
+					}
+				}
+				else
+				{
+					RedirectDeadWindows = 0;
+				}
+				const FVector StallBallLoc = BallCollision ? BallCollision->GetComponentLocation() : FVector::ZeroVector;
+				const FVector StallGravity = -Up;   // Up = -重力,见本函数开头
+				UE_LOG(LogTemp, Warning, TEXT("[GSRedirect] 爬得慢(0.3s %.1fcm,连续 %d 窗)但没被埋 → 继续骑行; ball=(%.0f,%.0f,%.0f) 接触=%s gap=%.1f 法线=(%.2f,%.2f,%.2f) 重力=(%.2f,%.2f,%.2f) up=(%.2f,%.2f,%.2f) 前向=(%.2f,%.2f,%.2f) 进度=%.0f/%.0f"),
+					WindowProgressCm, RedirectDeadWindows,
+					StallBallLoc.X, StallBallLoc.Y, StallBallLoc.Z, *ContactName, GapCm,
+					ContactNormal.X, ContactNormal.Y, ContactNormal.Z,
+					StallGravity.X, StallGravity.Y, StallGravity.Z,
+					Up.X, Up.Y, Up.Z, Forward.X, Forward.Y, Forward.Z,
+					GravityRedirectPathCm, GravityRedirectPathLength);
 			}
 		}
 	}

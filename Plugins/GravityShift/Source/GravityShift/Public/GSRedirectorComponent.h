@@ -34,6 +34,12 @@ public:
 
 	// 滑过多少厘米(cm)完成重力旋转 ≈ 弯道弧长(碰到圆弧才触发,所以这里就是弧长)。
 	// 球滚得快就转得快,不会出现"球还在坡上重力已转完"。
+	//
+	// 2026-10-10:改成**上限**。28 个转向器实测全用默认 260,而按网格包围盒算出来的弧长从
+	// 79(0.5 缩放的小件)到 201(Blockout_Corner_Curved)不等 —— 里程比弧长还长 ⇒ 球滚完
+	// 弯道时重力才转了 27°,带着半个重力压在出口几何上彻底动不了(Level3 的
+	// SM_LDI_Gravityshift_1/_11 就是这样静止 5 秒,直到硬超时)。实际里程取
+	// min(本值, 包围盒推算的弧长),重力正好在球滚出弯道那一刻转到位。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Redirector", meta = (ClampMin = "10.0"))
 	float RidePathLengthCm = 260.0f;
 
@@ -243,6 +249,11 @@ protected:
 	// 球面到滑梯表面的最近距离是否已进入容差(三个方向线探针取最小命中距离:
 	// 朝包围盒最近点 / 入口"下" / 出口"下");OutNormal 回传该接触面的法线。
 	bool IsBallTouchingChute(const class USphereComponent& BallSphere, const FVector& EntryUp, const FVector& ExitUp, FVector& OutNormal) const;
+
+	// 由网格包围盒推"滑行里程"(cm)= **球心**那条弧的长度:弧躺在两个重力轴张成的平面里,
+	// 网格弧半径取包围盒在该平面上两个方向的尺寸里**小的那个**,球骑内弧 ⇒ 球心弧半径
+	// = 网格弧半径 - 球半径,90° 弧长 = R·π/2。推不出时返回 0(调用方退回配置值)。
+	float ComputeChuteArcLengthCm(const FVector& EntryGravity, const FVector& ExitGravity, float BallRadiusCm) const;
 
 	// 特殊滑梯:面吸附触发判定(bFaceCaptureMode 生效时走这里,不走上面的 90° 弯道逻辑)。
 	// 球贴在本滑梯的**入口面**上(A=平面/高台 或 B=竖直面,由球当前重力识别)即命中;

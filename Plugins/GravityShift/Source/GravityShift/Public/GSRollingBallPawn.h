@@ -1113,6 +1113,12 @@ protected:
 	bool bHasRedirectPrevLoc = false;
 	float RedirectStallWindowSeconds = 0.0f;
 	float RedirectStallProgressCm = 0.0f;
+	// 连续"≈0 进度"的窗口数(2026-10-10):慢爬继续骑,连续两窗 0 进度才判定球被件挤住。
+	int32 RedirectDeadWindows = 0;
+	// 2026-10-10:件尺寸≈球直径(Level3 的 100cm 件,球也是 100cm)时球被几何**挤住**,
+	// 伺服推不动、埋深又是 0,物理上过不去。连续两窗 ≈0 进度就置位,改为每帧沿当前切向
+	// 自己把球带过去 —— 切向随重力一起转,沿它推进走出来的就是理想弧,与件几何无关。
+	bool bGravityRedirectCarry = false;
 	// 最近"无穿透"位置环(专家建议:救援退回时用它,而不是"来路×1.5R"盲推——终点校验
 	// 拦不住"中途穿过一面薄墙"的情况)。
 	static constexpr int32 SafeSampleCount = 12;

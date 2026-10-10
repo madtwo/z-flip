@@ -104,6 +104,34 @@ bool UGSRedirectorComponent::IsBallTouchingChute(const USphereComponent& BallSph
 	return bHitChute;
 }
 
+float UGSRedirectorComponent::ComputeChuteArcLengthCm(const FVector& EntryGravity, const FVector& ExitGravity, float BallRadiusCm) const
+{
+	if (!MeshBounds.IsValid)
+	{
+		return 0.0f;
+	}
+	// GetSize() 是全尺寸(不是 GetExtent() 的半尺寸)。两个重力轴都是单位轴向量,点乘即取该轴上的尺寸。
+	const FVector Size = MeshBounds.GetSize();
+	const float ExtEntry = FMath::Abs(FVector::DotProduct(Size, EntryGravity.GetSafeNormal()));
+	const float ExtExit = FMath::Abs(FVector::DotProduct(Size, ExitGravity.GetSafeNormal()));
+	// 球骑的是**内弧**,球心走的那条弧比网格弧短一个球半径 —— 那才是滑行里程。
+	// 实测(L3 的 SM_LDI_Gravityshift_1,网格弧 157):球只走了 78.5 = (100-50)·π/2,
+	// 剩下那半条弧球根本滚不到,重力自然只转了 45°。
+	// 减球半径永远只会把里程改**短**(重力转得更早),不会留下"球滚出弯道时重力还没转完"。
+	const float ChuteSizeCm = FMath::Min(ExtEntry, ExtExit);
+	const float CenterRadiusCm = ChuteSizeCm - BallRadiusCm;
+	if (CenterRadiusCm <= 20.0f)
+	{
+		// 件和球差不多大(甚至更小):球心几乎无处可走,这个件几何上就转不过去。
+		// 只能兜底给个短里程(重力尽快转完),并把"该改哪件"报出来 —— 首例就是 Level3 那几件
+		// 100cm 的 LDI(球直径 100cm 正好塞满),而 Level2 同款是 200cm,所以 Level2 不卡。
+		UE_LOG(LogTemp, Warning, TEXT("[GSRedirector] %s 件太小:包围盒 %.0fcm,球半径 %.0fcm ⇒ 球心弧半径仅 %.0fcm;建议放大到 %.0fcm 以上(Level2 同款件就是 %.0fcm,不卡)"),
+			*GetNameSafe(GetOwner()), ChuteSizeCm, BallRadiusCm, CenterRadiusCm,
+			BallRadiusCm * 4.0f, BallRadiusCm * 4.0f);
+	}
+	return FMath::Max(CenterRadiusCm, 20.0f) * HALF_PI;
+}
+
 // 特殊滑梯:面吸附触发(2026-09-15 用户需求)。
 // 判定链:两面垂直 → 球当前重力落在某一面 → 该面允许吸附进入 → 球心朝该面法线反向探到
 // **本滑梯** → 接触法线确实是这一面的 → (可选)球在沿面前进 → 速度达下限 → 交给 Pawn。
@@ -521,19 +549,24 @@ void UGSRedirectorComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	float ForwardSpeed = FVector::DotProduct(Tangential, ExitDir);
 	ForwardSpeed = FMath::Clamp(ForwardSpeed, MinEntrySpeedCm, MaxRideSpeedCm);
 
+	// 滑行里程 = **弯道弧长**(RidePathLengthCm 只当上限,见头文件):里程比弧长还长的话,
+	// 球滚完弯道时重力还没转到位,带着半个重力压在出口几何上就动不了了。
+	const float AutoArcCm = ComputeChuteArcLengthCm(EntryGravity, ExitDir, Radius);
+	const float EffectiveRidePathCm = (AutoArcCm > 0.0f) ? FMath::Min(RidePathLengthCm, AutoArcCm) : RidePathLengthCm;
+
 	// 交给 Pawn 滑行(速度在 Pawn 里逐帧锁在弯道切向;这里先摆好入口速度)。
 	Ball->SetBallLinearVelocity(ExitDir * ForwardSpeed, false);
-	Ball->BeginGravityRedirect(ExitDir, ForwardSpeed, BendAxis, RidePathLengthCm);
+	Ball->BeginGravityRedirect(ExitDir, ForwardSpeed, BendAxis, EffectiveRidePathCm);
 	bRiding = Ball->IsGravityRedirecting();
 	LastFireTime = Now;
 
 	if (bDebugLog)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s fired: ball=(%.0f,%.0f,%.0f) vIn=(%.0f,%.0f,%.0f) %s→%s axis=(%.2f,%.2f,%.2f) ride=%.0f path=%.0f"),
+		UE_LOG(LogTemp, Log, TEXT("[GSRedirector] %s fired: ball=(%.0f,%.0f,%.0f) vIn=(%.0f,%.0f,%.0f) %s→%s axis=(%.2f,%.2f,%.2f) ride=%.0f path=%.0f(配置 %.0f,弧长 %.0f)"),
 			*GetNameSafe(GetOwner()), BallLoc.X, BallLoc.Y, BallLoc.Z,
 			Velocity.X, Velocity.Y, Velocity.Z,
 			*GSGravity::GetDirectionDisplayName(bEnterFromA ? GravityDirectionA : GravityDirectionB),
 			*GSGravity::GetDirectionDisplayName(bEnterFromA ? GravityDirectionB : GravityDirectionA),
-			BendAxis.X, BendAxis.Y, BendAxis.Z, ForwardSpeed, RidePathLengthCm);
+			BendAxis.X, BendAxis.Y, BendAxis.Z, ForwardSpeed, EffectiveRidePathCm, RidePathLengthCm, AutoArcCm);
 	}
 }
