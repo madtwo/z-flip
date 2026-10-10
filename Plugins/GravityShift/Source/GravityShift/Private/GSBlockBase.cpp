@@ -172,7 +172,10 @@ void AGSBlockBase::FreezeMotion()
 
 bool AGSBlockBase::CanChangeGravity() const
 {
-	return GravityBody && Mesh && Mesh->IsSimulatingPhysics() && GravityBody->bGravityEnabled;
+	// 悬浮待命方块:重力尚未"开闸"(bGravityEnabled=false),但准星必须能锁定它——
+	// 首次点击后由 ToggleGravityZ 唤醒。
+	return GravityBody && Mesh && Mesh->IsSimulatingPhysics()
+		&& (GravityBody->bGravityEnabled || (bStartStaticUntilClicked && !bActivatedByClick));
 }
 
 FVector AGSBlockBase::GetGravityAxisWorld() const
@@ -199,6 +202,23 @@ void AGSBlockBase::SetGravityRises(bool bRises)
 bool AGSBlockBase::ToggleGravityZ()
 {
 	SetGravityRises(!bGravityRises);
+
+	// 悬浮待命方块:第一次点击 = 唤醒。开重力(含把配置也改成"受重力",防止后续
+	// ApplyCurrentConfiguration 又把它关掉)、恢复缩放、唤醒刚体,立刻沿新方向走。
+	if (bStartStaticUntilClicked && !bActivatedByClick)
+	{
+		bActivatedByClick = true;
+		bAffectedByGravity = true;
+		SetAffectedByGravity(true);
+		if (GravityBody)
+		{
+			GravityBody->GravityScale = GravityScale;
+		}
+		if (Mesh)
+		{
+			Mesh->WakeAllRigidBodies();
+		}
+	}
 	return bGravityRises;
 }
 
@@ -270,7 +290,14 @@ void AGSBlockBase::ApplyCurrentConfiguration()
 		GravityBody->SetTargetPrimitive(Mesh);
 		GravityBody->bGravityEnabled = bAffectedByGravity;
 		GravityBody->bUseContinuousCollisionDetection = bUseContinuousCollisionDetection;
-		GravityBody->GravityScale = GravityScale;
+		// 悬浮待命期:GravityScale 按 0 计(准星仍可锁定——bGravityEnabled 之外都不动),
+		// 首次点击唤醒后恢复配置值(见 ToggleGravityZ)。
+		const bool bPendingFirstClick = bStartStaticUntilClicked && !bActivatedByClick;
+		GravityBody->GravityScale = bPendingFirstClick ? 0.0f : GravityScale;
+		if (bPendingFirstClick)
+		{
+			FreezeMotion();
+		}
 		GravityBody->MaximumSpeedCm = MaximumSpeedCm;
 		GravityBody->BaseImpactEnergyMultiplier = ImpactEnergyMultiplier;
 		GravityBody->ImpactSourceTag = ImpactSourceTag;

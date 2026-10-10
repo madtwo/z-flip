@@ -105,6 +105,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	FVector GravityAxisLocal = FVector::ZeroVector;
 
+	// 悬浮待命(2026-10-10 星球坠落玩法):开局保持模拟物理但"不给重力"(GravityScale 按 0 计),
+	// 像钉在半空一样纹丝不动;准星仍能锁定它(GravityBody->bGravityEnabled 保持 true)。
+	// 首次被瞄准点击(ToggleGravityZ)时唤醒:恢复配置的 GravityScale,立即沿新方向走。
+	// 典型配置:gravity_rises=true(初始朝上,不生效)+ 本开关开 → 点击后翻成 -Z 一路坠落。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
+	bool bStartStaticUntilClicked = false;
+
+	// 运行期标记:悬浮待命方块是否已被玩家点名唤醒。
+	UPROPERTY(Transient, VisibleAnywhere, Category = "GravityShift")
+	bool bActivatedByClick = false;
+
 	/** 当前重力方向(世界空间)。零轴哨兵 = 老的世界 ±Z。 */
 	FVector GetGravityAxisWorld() const;
 
