@@ -51,20 +51,29 @@ class GRAVITYSHIFT_API AGSGravityHUD : public AHUD
 public:
 	AGSGravityHUD();
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
-	bool bShowGravityStatus = true;
+	// 2026-10-11 收尾:正式演示不再显示左上角调试块。四个开发用开关全部默认关
+	// (Gravity/Fall/Collectible 状态、英文操作行、编译时间戳);游戏自己的
+	// HUD 提示(互动悬停文字 / 拾取线索)与 UMG 不受影响。
+	// 排查时在关卡 HUD 的 Details 里把对应开关勾回来即可。
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
-	bool bShowFallStatus = true;
+	bool bShowGravityStatus = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
-	bool bShowCollectibleStatus = true;
+	bool bShowFallStatus = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
+	bool bShowCollectibleStatus = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	bool bShowInteractionPrompt = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
-	bool bShowControls = true;
+	bool bShowControls = false;
+
+	// 编译时间戳(多人协作仲裁"跑的 dll 是哪次编的"用),正式演示默认关。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
+	bool bShowBuildStamp = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift")
 	FVector2D StartPosition = FVector2D(24.0f, 24.0f);

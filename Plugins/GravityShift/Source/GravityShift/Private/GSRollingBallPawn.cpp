@@ -9,6 +9,7 @@
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
+#include "Kismet/KismetSystemLibrary.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -2749,6 +2750,22 @@ void AGSRollingBallPawn::PollNativeInput()
 		ResetToCheckpoint();
 	}
 	bResetKeyWasDown = bResetDown;
+
+	// 2026-10-11 收尾:ESC = 随时退出游戏(用户收尾需求;沿用本类的轮询式输入)。
+	// 主菜单图(MainMenu)不生效:那边"按任意键"要接任意键,且菜单里本就有"退出游戏"按钮。
+	if (PC)
+	{
+		const bool bEscapeDown = PC->IsInputKeyDown(EKeys::Escape);
+		if (bEscapeDown && !bEscapeKeyWasDown)
+		{
+			const FString MapName = GetWorld() ? GetWorld()->GetMapName() : FString();
+			if (!MapName.Contains(TEXT("MainMenu")))
+			{
+				UKismetSystemLibrary::QuitGame(this, PC, EQuitPreference::Quit, /*bIgnorePlatformRestrictions=*/false);
+			}
+		}
+		bEscapeKeyWasDown = bEscapeDown;
+	}
 
 	// Player camera-distance keys: each press steps the rail camera's trail.
 	// 无轨相机(新机制默认)时改调弹簧臂距离。

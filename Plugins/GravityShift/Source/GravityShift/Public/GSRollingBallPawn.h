@@ -455,8 +455,11 @@ public:
 	float WallStairNormalAlignMin = 0.75f;
 
 	// 水平安装门:踏面法线与世界 +Z 的余弦 ≥ 该值 = 地面楼梯,交给旧系统(零回归保证)。
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float WallStairFloorMountUpDot = 0.75f;
+	// 2026-10-11 收尾:用户此前把"放行平放楼梯"的 1.1 只改在了 BP_GSRollingBallPawn 的
+	// CDO 上,而游戏实际用的是本 C++ 类 ⇒ 从未生效;这里固化进 C++(1.1 > 1 ⇒ 不再有
+	// "水平件交回旧系统"的分流,平放楼梯也走墙楼梯助力)。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|WallStair", meta = (ClampMin = "0.0", ClampMax = "1.1"))
+	float WallStairFloorMountUpDot = 1.1f;
 
 	// 爬升伺服(专家 Q2):沿真实坡向把速度顶到该值,误差/响应时间 = 加速度,封顶 MaxAssist。
 	// 500cm/s 穿过约 54.5cm 的 43° 面只需 ~0.11s。
@@ -1141,6 +1144,8 @@ protected:
 	bool bRailCamActive = false;
 	bool bInteractKeyWasDown = false;
 	bool bResetKeyWasDown = false;
+	// 2026-10-11 收尾:ESC 随时退出(边沿触发,见 Tick 输入轮询)。
+	bool bEscapeKeyWasDown = false;
 	bool bTrailCloserKeyWasDown = false;
 	bool bTrailFartherKeyWasDown = false;
 	bool bSpeedDownKeyWasDown = false;

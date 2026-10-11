@@ -31,6 +31,15 @@ void AGSGravityGameMode::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// 2026-10-11 收尾:最终演示不需要引擎屏显消息(左上角红色
+	// "LIGHTING NEEDS TO BE REBUILT" 之类的开发者提示都走 ScreenMessage)。
+	// 游戏自己的 HUD/UMG 提示不受影响(那走 Canvas/UMG,不进 ScreenMessage)。
+	// 需要调试时在控制台执行 EnableAllScreenMessages 即可恢复。
+	if (GEngine && GetWorld())
+	{
+		GEngine->Exec(GetWorld(), TEXT("DisableAllScreenMessages"));
+	}
+
 	if (bAutoSpawnCoreManagers)
 	{
 		EnsureCoreManagers();
@@ -246,7 +255,11 @@ void AGSGravityHUD::DrawHUD()
 
 	// 编译时间戳:一眼鉴定"跑的 dll 是哪次编的"——多人协作时"源码是新的但行为是旧的"
 	// (dll 没重编)的仲裁证据。__DATE__/__TIME__ 是本编译单元的编译时刻。
-	Lines.Add(FString::Printf(TEXT("GS build %s %s"), ANSI_TO_TCHAR(__DATE__), ANSI_TO_TCHAR(__TIME__)));
+	// 2026-10-11 收尾:默认关(bShowBuildStamp),正式演示左上角不再有调试文字。
+	if (bShowBuildStamp)
+	{
+		Lines.Add(FString::Printf(TEXT("GS build %s %s"), ANSI_TO_TCHAR(__DATE__), ANSI_TO_TCHAR(__TIME__)));
+	}
 
 	if (bShowGravityStatus)
 	{
