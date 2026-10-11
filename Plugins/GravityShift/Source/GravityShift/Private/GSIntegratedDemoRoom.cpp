@@ -119,7 +119,9 @@ void AGSIntegratedDemoRoom::SpawnDemoActors()
 	AGSBlockBase* Block = World->SpawnActor<AGSBlockBase>(AGSBlockBase::StaticClass(), FTransform(FRotator::ZeroRotator, Base + FVector(400.0, 0.0, MidZ)));
 	if (Block)
 	{
+#if WITH_EDITOR
 		Block->SetActorLabel(TEXT("DemoRoom_GravityBlock"));
+#endif
 		Block->SetAffectedByGravity(true);
 		Block->SetSimulatingPhysics(true);
 		Block->ApplyCurrentConfiguration();
@@ -128,7 +130,9 @@ void AGSIntegratedDemoRoom::SpawnDemoActors()
 	AGSGravitySwitch* Switch = World->SpawnActor<AGSGravitySwitch>(AGSGravitySwitch::StaticClass(), FTransform(FRotator::ZeroRotator, Base + FVector(-400.0, 0.0, FloorLocalZ + 80.0)));
 	if (Switch)
 	{
+#if WITH_EDITOR
 		Switch->SetActorLabel(TEXT("DemoRoom_GravitySwitch"));
+#endif
 	}
 
 	bDemoSpawned = true;

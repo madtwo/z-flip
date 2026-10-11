@@ -48,14 +48,18 @@ void AGSGravityGameMode::EnsureCoreManagers()
 	if (!AGSGravityManager::FindGravityManager(this) && GravityManagerClass)
 	{
 		AGSGravityManager* Manager = World->SpawnActor<AGSGravityManager>(GravityManagerClass, FTransform::Identity);
+#if WITH_EDITOR
 		Manager->SetActorLabel(TEXT("GravityShift_Manager"));
+#endif
 		UE_LOG(LogTemp, Log, TEXT("[GravityShift] game mode spawned gravity manager"));
 	}
 
 	if (!AGSWorldStateManager::FindWorldStateManager(this) && WorldStateManagerClass)
 	{
 		AGSWorldStateManager* StateManager = World->SpawnActor<AGSWorldStateManager>(WorldStateManagerClass, FTransform::Identity);
+#if WITH_EDITOR
 		StateManager->SetActorLabel(TEXT("GravityShift_WorldState"));
+#endif
 		UE_LOG(LogTemp, Log, TEXT("[GravityShift] game mode spawned world state manager"));
 	}
 
