@@ -385,6 +385,11 @@ void AGSRollingBallPawn::EndGravityRedirect()
 			GravityManager->RequestGravityDirection(
 				GSGravity::VectorToDirection(GravityRedirectTo), this, EGSGravityChangeReason::SCRIPTED, true);
 		}
+		else
+		{
+			// 打包版自检:管理器为空 ⇒ 这次转向的重力提交没生效(球会滑回原面)。
+			UE_LOG(LogTemp, Warning, TEXT("[GSRedirect] 释放时提交被跳过: pawn 无 GravityManager(转向不会生效)"));
+		}
 	}
 	if (GravityBody)
 	{
@@ -727,6 +732,10 @@ void AGSRollingBallPawn::UpdateGravityRedirect(float DeltaSeconds)
 			GravityManager->RequestGravityDirection(
 				GSGravity::VectorToDirection(GravityRedirectTo), this, EGSGravityChangeReason::SCRIPTED, true);
 		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[GSRedirect] 旋转完成但提交被跳过: pawn 无 GravityManager(转向不会生效)"));
+		}
 	}
 
 	// 4) 保险:超时强制释放,避免异常状态下永久夺走玩家控制。
@@ -849,6 +858,10 @@ void AGSRollingBallPawn::EndFaceCapture()
 		bFaceCaptureGravityCommitted = true;
 		GravityManager->RequestGravityDirection(
 			GSGravity::VectorToDirection(FaceCaptureGravityTo), this, EGSGravityChangeReason::SCRIPTED, true);
+	}
+	else if (!bFaceCaptureGravityCommitted && !GravityManager)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[GSFaceCapture] 结束提交被跳过: pawn 无 GravityManager(面吸附转向不会生效)"));
 	}
 	if (GravityBody)
 	{
@@ -2994,6 +3007,21 @@ void AGSRollingBallPawn::UpdateStuckRescue(float DeltaSeconds)
 void AGSRollingBallPawn::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+
+	// 2026-10-11 打包版启动顺序修复:打包构建里玩家 pawn 先于 GameMode::BeginPlay 生成
+	// (EnsureCoreManagers 在 BeginPlay 才建管理器),而引用只在 BeginPlay/HandleStartingNewPlayer
+	// 各刷一次 ⇒ 打包版 GravityManager 永远为空,转向器骑到顶后的重力提交被静默跳过
+	// (实测症状:球滚上圆弧→riding 正常→释放正常→重力不翻→滑回地面 = "转向器无效")。
+	// 开局 10 秒内逐帧补刷,拿到即停;并留一行日志作为打包版自检证据。
+	if ((!GravityManager || !WorldStateManager) && GetWorld() && GetWorld()->GetTimeSeconds() < 10.0)
+	{
+		const bool bManagerMissing = !GravityManager;
+		RefreshSystemReferences();
+		if (bManagerMissing && GravityManager)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[GravityShift] %s: GravityManager 开局补刷成功(%s)"), *GetName(), *GravityManager->GetName());
+		}
+	}
 
 	// 卡死救援必须**先于**骑行/吸附驱动运行:那两个函数每帧会用 SetPhysicsLinearVelocity
 	// 写入 500cm/s 的指令速度,排在它们后面的救援读到的是指令值而非物理解算结果

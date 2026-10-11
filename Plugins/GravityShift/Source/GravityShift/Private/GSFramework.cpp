@@ -106,6 +106,12 @@ AActor* AGSGravityGameMode::ChoosePlayerStart_Implementation(AController* Player
 
 void AGSGravityGameMode::HandleStartingNewPlayer_Implementation(APlayerController* NewPlayer)
 {
+	// 2026-10-11 打包版启动顺序修复:打包构建里本地玩家(含球)在 LoadMap 阶段生成,
+	// **先于** GameMode::BeginPlay(那里才 EnsureCoreManagers 建管理器)。结果打包版里球的
+	// GravityManager/WorldStateManager 引用为空、转向器重力提交被静默跳过(实测"转向器无效")。
+	// 在生成玩家之前先把管理器建好,球的 BeginPlay 就能找到它们(EnsureCoreManagers 幂等)。
+	EnsureCoreManagers();
+
 	Super::HandleStartingNewPlayer_Implementation(NewPlayer);
 
 	AGSRollingBallPawn* Ball = NewPlayer ? Cast<AGSRollingBallPawn>(NewPlayer->GetPawn()) : nullptr;
