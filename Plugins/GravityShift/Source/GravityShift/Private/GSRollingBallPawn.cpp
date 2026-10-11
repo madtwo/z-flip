@@ -70,6 +70,16 @@ AGSRollingBallPawn::AGSRollingBallPawn()
 	if (ToyBallAsset.Succeeded())
 	{
 		BallMesh->SetStaticMesh(ToyBallAsset.Object);
+		// ToyBall 是 Nanite 网格,而贴脸淡出用的 M_GS_BallFade 是 Translucent —— Nanite 只支持
+		// Opaque/Masked,引擎会在**打包产物里**把该材质换成 Default Material(灰白棋盘格),
+		// 于是"贴脸时球淡出"变成"贴脸时一坨棋盘格糊住镜头"(编辑器里看不出问题)。
+		// 判据就是包日志里这两条:
+		//   LogStaticMesh: Warning: Invalid material [MID_M_GS_BallFade_...] used on Nanite
+		//     static mesh [ToyBall]. ... [BLEND_Translucent] ... ("Disallow Nanite" on static
+		//     mesh components can be used to suppress this warning...)
+		//   LogMaterial: Warning: Material .../M_GS_BallFade missing usage flag Nanite!
+		// 球就一个球体,关掉 Nanite 走光栅路径,半透明才真的生效(见 [[ue-packaging-cook-chain]])。
+		BallMesh->SetForceDisableNanite(true);
 	}
 	else if (SphereAsset.Succeeded())
 	{

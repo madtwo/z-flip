@@ -78,8 +78,14 @@ class GRAVITYSHIFT_API UGSMainMenuWidget : public UUserWidget
 
 public:
 	// "开始游戏"要打开的关卡。默认游戏关卡,编辑器里可改。
+	//
+	// ⚠ 2026-10-11 从 /Game/测试案例 改成 /Game/Maps/Main:测试案例 在 Content 根目录,
+	// 不在 DefaultGame.ini 的 Map 扫描目录(/Game/Maps)里,也没有任何会被 cook 的资产
+	// 引用它(这里只是个 C++ 字面量,不算资产引用)⇒ 打出来的包里根本没有这张图,
+	// 编辑器里点"开始游戏"能进、导出后点了没反应。凡是写死在这里的图都必须是
+	// /Game/Maps/ 下的图,否则一定不进包。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GravityShift|Menu")
-	FName GameLevelName = FName(TEXT("/Game/测试案例"));
+	FName GameLevelName = FName(TEXT("/Game/Maps/Main"));
 
 protected:
 	virtual TSharedRef<SWidget> RebuildWidget() override;
