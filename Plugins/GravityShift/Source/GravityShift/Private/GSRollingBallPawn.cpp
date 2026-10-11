@@ -43,6 +43,13 @@ AGSRollingBallPawn::AGSRollingBallPawn()
 	// landing-response code. Force the combine rule to Min so the ball never
 	// restitutes against any world surface (0 + anything => 0); all bounce and
 	// anti-gravity launch is applied by code (LandingResponse) instead.
+	//
+	// ⚠ 只在非 CDO 上设。CDO 构造时 GEngine 还没起来,SetPhysMaterialOverride →
+	// UpdatePhysicalMaterials/UpdateMassProperties 会打 3 条 LogPhysics Error
+	// ("GEngine not initialized")。打包的 cook commandlet 把任何 UE_LOG(Error)
+	// 都算失败(LaunchEngineLoop.cpp:4222 → ExitCode=1 → "Cook failed")。
+	// 运行时 spawn 出来的实例不是 CDO,构造器照跑,零回弹行为不变。
+	if (!HasAnyFlags(RF_ClassDefaultObject))
 	{
 		UPhysicalMaterial* PhysMat = NewObject<UPhysicalMaterial>(GetTransientPackage(), TEXT("GSBallZeroRestitution"));
 		PhysMat->Restitution = 0.0f;
